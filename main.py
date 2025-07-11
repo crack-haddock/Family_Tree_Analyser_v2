@@ -30,54 +30,9 @@ def get_date(record, tag):
     return None
 
 def get_sort_order():
-    order = input("Sort by birth year ascending or descending? (asc/desc, default asc): ").strip().lower()
+    order = input("Sort by birth year ascending or descending? (asc/desc, default asc): ")
+
     return order == 'desc'
-
-def query_male_moss_over_40(parser, descending, ancestor_ids=None):
-    today = datetime.today()
-    results = []
-    for indi in parser.records0('INDI'):
-        if ancestor_ids and indi.xref_id not in ancestor_ids:
-            continue
-        surname = indi.name.surname if indi.name else ''
-        sex = indi.sex
-        if surname and surname.lower() == 'moss' and sex == 'M':
-            birth = get_date(indi, 'BIRT')
-            death = get_date(indi, 'DEAT')
-            birth_year = birth.year if birth else None
-            if birth:
-                if death:
-                    age = (death - birth).days // 365
-                else:
-                    age = (today - birth).days // 365
-                if age > 40:
-                    name = indi.name.format()
-                    results.append((birth_year, name, age, 'Deceased' if death else 'Alive'))
-    results = [r for r in results if r[0] is not None]
-    results.sort(key=lambda x: x[0], reverse=descending)
-    for birth_year, name, age, status in results:
-        print(f"Name: {name}, Birth Year: {birth_year}, Age: {age}, {status}")
-    print(f"Total: {len(results)}")
-
-def query_over_100_no_death(parser, descending, ancestor_ids=None):
-    today = datetime.today()
-    people = []
-    for indi in parser.records0('INDI'):
-        if ancestor_ids and indi.xref_id not in ancestor_ids:
-            continue
-        name = indi.name.format() if indi.name else ''
-        birth = get_date(indi, 'BIRT')
-        death = get_date(indi, 'DEAT')
-        birth_year = birth.year if birth else None
-        if birth and not death:
-            age = (today - birth).days // 365
-            if age > 100:
-                people.append((birth_year, age, name))
-    people = [p for p in people if p[0] is not None]
-    people.sort(key=lambda x: x[0], reverse=descending)
-    for birth_year, age, name in people:
-        print(f"Name: {name}, Birth Year: {birth_year}, Age: {age}, Alive (no death date)")
-    print(f"Total: {len(people)}")
 
 def query_negative_age(parser, descending, ancestor_ids=None):
     today = datetime.today()
@@ -209,12 +164,13 @@ def query_oldest_people(parser, ancestor_ids=None):
     print(f"Total shown: {min(n, len(results))} of {len(results)}")
 
 def query_birthplace_counts(parser, ancestor_ids=None, show_counties=False):
-    counts = {"England": 0, "Wales": 0, "Scotland": 0, "No birth data at all": 0, "Could not classify": 0, "Devon/Dorset": 0,
+    counts = {"England": 0, "Wales": 0, "Scotland": 0, "Unspecified": 0, "Could not classify": 0, "Devon/Dorset": 0,
         "Cheshire": 0, "Shropshire": 0, "London": 0, "Liverpool": 0, "Kent": 0, "Cornwall": 0, "Sussex": 0,
         "Flintshire": 0, "Denbighshire": 0, "Caernarvonshire": 0, "Glasgow": 0, "Edinburgh": 0, "Staffordshire": 0,
         "Cambridgeshire": 0, "Surrey": 0, "Norfolk": 0, "Lincolnshire": 0, "Lancashire": 0, "Yorkshire": 0,
         "Middlesex": 0, "Berkshire": 0, "Cumberland": 0, "Northamptonshire": 0, "Renfrewshire": 0, "Lanarkshire": 0}
     unclassified_places = {}
+    unspecified_count = 0  # Track blank/empty birthplaces
     county_to_nation = {
         "cheshire": "England",
         "shropshire": "England",
@@ -267,65 +223,61 @@ def query_birthplace_counts(parser, ancestor_ids=None, show_counties=False):
                 for sub2 in sub.sub_records:
                     if sub2.tag == 'PLAC':
                         birth_place = str(sub2.value).lower().strip()
-        if not birth and not birth_place:
-            counts["No birth data at all"] += 1
-        elif birth_place:
-            # Always check for devon/dorset first
-            if ("devon" in birth_place or "dorset" in birth_place):
-                counts["Devon/Dorset"] += 1
-                counts["England"] += 1
-                continue
-            found = False
-            # 1. Place-to-county (most specific, e.g. cathcart -> renfrewshire)
-            for place, county in place_to_county.items():
-                if place in birth_place:
-                    nation = county_to_nation.get(county)
-                    if nation:
-                        counts[nation] += 1
+        # Normalize blank/None birth_place for unclassified tracking
+        if not birth_place:
+            counts["Unspecified"] += 1
+            continue  # Do not add to unclassified or could not classify
+        # Always check for devon/dorset first
+        if ("devon" in birth_place or "dorset" in birth_place):
+            counts["Devon/Dorset"] += 1
+            counts["England"] += 1
+            continue
+        found = False
+        # 1. Place-to-county (most specific, e.g. cathcart -> renfrewshire)
+        for place, county in place_to_county.items():
+            if place in birth_place:
+                nation = county_to_nation.get(county)
+                if nation:
+                    counts[nation] += 1
+                county_key = county.capitalize() if county != "devon/dorset" else "Devon/Dorset"
+                if county_key in counts:
+                    counts[county_key] += 1
+                found = True
+                break  # Only use the first matching place-to-county
+        # 2. Fuzzy match for 'glasgow'/'glascow' (if not already matched)
+        if not found:
+            if ("glasgow" in birth_place or "glascow" in birth_place):
+                counts["Scotland"] += 1
+                if counts.get("Glasgow") is not None:
+                    counts["Glasgow"] += 1
+                found = True
+        # 3. County/city
+        if not found:
+            for county, nation in county_to_nation.items():
+                if county in birth_place:
+                    counts[nation] += 1
                     county_key = county.capitalize() if county != "devon/dorset" else "Devon/Dorset"
                     if county_key in counts:
                         counts[county_key] += 1
                     found = True
-                    break  # Only use the first matching place-to-county
-            # 2. Fuzzy match for 'glasgow'/'glascow' (if not already matched)
-            if not found:
-                if ("glasgow" in birth_place or "glascow" in birth_place):
-                    counts["Scotland"] += 1
-                    if counts.get("Glasgow") is not None:
-                        counts["Glasgow"] += 1
+                    break
+        # 4. Nation only
+        if not found:
+            if birth_place in ["england", "wales", "scotland"]:
+                counts[birth_place.capitalize()] += 1
+                found = True
+        # 5. Nation plus other text
+        if not found:
+            for nation in ["england", "wales", "scotland"]:
+                if nation in birth_place:
+                    counts[nation.capitalize()] += 1
+                    if birth_place != nation:
+                        unclassified_places[birth_place] = unclassified_places.get(birth_place, 0) + 1
                     found = True
-            # 3. County/city
-            if not found:
-                for county, nation in county_to_nation.items():
-                    if county in birth_place:
-                        counts[nation] += 1
-                        county_key = county.capitalize() if county != "devon/dorset" else "Devon/Dorset"
-                        if county_key in counts:
-                            counts[county_key] += 1
-                        found = True
-                        break
-            # 4. Nation only
-            if not found:
-                if birth_place in ["england", "wales", "scotland"]:
-                    counts[birth_place.capitalize()] += 1
-                    found = True
-            # 5. Nation plus other text
-            if not found:
-                for nation in ["england", "wales", "scotland"]:
-                    if nation in birth_place:
-                        counts[nation.capitalize()] += 1
-                        if birth_place != nation:
-                            unclassified_places[birth_place] = unclassified_places.get(birth_place, 0) + 1
-                        found = True
-                        break
-            if not found:
-                counts["Could not classify"] += 1
-                if birth_place:
-                    unclassified_places[birth_place] = unclassified_places.get(birth_place, 0) + 1
-        else:
+                    break
+        if not found:
             counts["Could not classify"] += 1
-            if birth_place:
-                unclassified_places[birth_place] = unclassified_places.get(birth_place, 0) + 1
+            unclassified_places[birth_place] = unclassified_places.get(birth_place, 0) + 1
     print("Birthplace counts{}:".format(" (with counties/cities indented under nations)" if show_counties else ""))
     for nation in ["England", "Wales", "Scotland"]:
         if counts[nation] > 0:
@@ -337,8 +289,8 @@ def query_birthplace_counts(parser, ancestor_ids=None, show_counties=False):
                         print(f"  {label}: {counts[label]}")
     if counts["Devon/Dorset"] > 0 and not show_counties:
         print(f"Devon/Dorset: {counts['Devon/Dorset']}")
-    if counts["No birth data at all"] > 0:
-        print(f"No birth data at all: {counts['No birth data at all']}")
+    if counts["Unspecified"] > 0:
+        print(f"Unspecified: {counts['Unspecified']}")
     if counts["Could not classify"] > 0:
         print(f"Could not classify: {counts['Could not classify']}")
     # Only show unclassified places and prompt if show_counties is True
@@ -586,6 +538,180 @@ def filter_ancestors_by_birth_year(parser, ancestor_ids, min_year=None, max_year
         filtered.add(indi.xref_id)
     return filtered
 
+def query_multiple_birth_places(parser, ancestor_ids=None):
+    """List every person who has more than one unique birthplace listed (multiple PLAC tags under BIRT events).
+    The first birthplace found (PLAC under first BIRT) is listed first as the 'real' one."""
+    print("\nIndividuals with multiple birth places given:")
+    count = 0
+    for indi in parser.records0('INDI'):
+        if ancestor_ids and indi.xref_id not in ancestor_ids:
+            continue
+        name = indi.name.format() if indi.name else indi.xref_id
+        birth_year = None
+        birth_places = []
+        for sub in indi.sub_records:
+            if sub.tag == 'BIRT':
+                # Get birth year from first BIRT event
+                if birth_year is None:
+                    birth = get_date(sub, 'DATE')
+                    birth_year = birth.year if birth else None
+                for sub2 in sub.sub_records:
+                    if sub2.tag == 'PLAC':
+                        bp = str(sub2.value).strip()
+                        if bp:
+                            birth_places.append(bp)
+        # Remove duplicates, preserve order
+        unique_places = []
+        seen = set()
+        for bp in birth_places:
+            bp_norm = bp.lower().strip()
+            if bp_norm not in seen:
+                unique_places.append(bp)
+                seen.add(bp_norm)
+        if len(unique_places) > 1:
+            count += 1
+            print(f"\n{name} (Birth Year: {birth_year if birth_year else 'Unknown'}):")
+            for idx, bp in enumerate(unique_places):
+                label = "(real)" if idx == 0 else ""
+                print(f"  {bp} {label}")
+    print(f"\nTotal individuals with multiple birth places: {count}")
+
+def query_birth_details_for_person(parser, ancestor_ids=None):
+    """Ask for name and minimum birth year, then report all known birth dates and birth places for the selected person, showing the tag source for each place. If ancestor_ids is set, only allow selection from those individuals. Also extract 'Birthplace:' and place-like lines from NOTE tags, including lines with commas (likely places)."""
+    name = input("Enter name (or part of name): ").strip().lower()
+    birth_year_str = input("Enter minimum birth year (or leave blank to match any): ").strip()
+    min_birth_year = int(birth_year_str) if birth_year_str else None
+    matches = []
+    for indi in parser.records0('INDI'):
+        if ancestor_ids and indi.xref_id not in ancestor_ids:
+            continue
+        indi_name = indi.name.format().lower() if indi.name else ''
+        birth = get_date(indi, 'BIRT')
+        indi_birth_year = birth.year if birth else None
+        if name in indi_name and (min_birth_year is None or (indi_birth_year is not None and indi_birth_year >= min_birth_year)):
+            matches.append(indi)
+    if not matches:
+        print("No individual found with that name and birth year.")
+        return
+    if len(matches) > 1:
+        print("Multiple matches found:")
+        for idx, indi in enumerate(matches, 1):
+            n = indi.name.format() if indi.name else indi.xref_id
+            birth = get_date(indi, 'BIRT')
+            by = birth.year if birth else 'Unknown'
+            print(f"{idx}. {n} (Birth Year: {by})")
+        try:
+            sel = int(input("Select individual by number: ").strip())
+            indi = matches[sel-1]
+        except Exception:
+            print("Invalid selection.")
+            return
+    else:
+        indi = matches[0]
+    print(f"\nDetails for {indi.name.format() if indi.name else indi.xref_id}:")
+    birth_details = []
+    # 1. BIRT/DATE and BIRT/PLAC
+    for sub in indi.sub_records:
+        if sub.tag == 'BIRT':
+            birth_date = None
+            for sub2 in sub.sub_records:
+                if sub2.tag == 'DATE':
+                    birth_date = str(sub2.value).strip()
+            birth_places = [(str(sub2.value).strip(), 'BIRT/PLAC') for sub2 in sub.sub_records if sub2.tag == 'PLAC' and str(sub2.value).strip()]
+            birth_details.append({
+                'event': 'Birth',
+                'date': birth_date,
+                'places': birth_places
+            })
+    # 2. BAPM/PLAC
+    for sub in indi.sub_records:
+        if sub.tag == 'BAPM':
+            bapm_places = [(str(sub2.value).strip(), 'BAPM/PLAC') for sub2 in sub.sub_records if sub2.tag == 'PLAC' and str(sub2.value).strip()]
+            if bapm_places:
+                birth_details.append({
+                    'event': 'Baptism',
+                    'date': None,
+                    'places': bapm_places
+                })
+    # 3. CHR/PLAC
+    for sub in indi.sub_records:
+        if sub.tag == 'CHR':
+            chr_places = [(str(sub2.value).strip(), 'CHR/PLAC') for sub2 in sub.sub_records if sub2.tag == 'PLAC' and str(sub2.value).strip()]
+            if chr_places:
+                birth_details.append({
+                    'event': 'Christening',
+                    'date': None,
+                    'places': chr_places
+                })
+    # 4. Top-level PLAC (rare, but possible)
+    for sub in indi.sub_records:
+        if sub.tag == 'PLAC':
+            bp = str(sub.value).strip()
+            if bp:
+                birth_details.append({
+                    'event': 'Top-level PLAC',
+                    'date': None,
+                    'places': [(bp, 'PLAC')]
+                })
+    # 5. NOTE tags (look for place-like phrases)
+    import re
+    place_re = re.compile(r'(?:born|baptised|christened|at|in) ([A-Za-z0-9 ,.-]+)', re.IGNORECASE)
+    birthplace_re = re.compile(r'Birthplace: ([A-Za-z0-9 ,.-]+)', re.IGNORECASE)
+    place_like_re = re.compile(r'^[A-Za-z][A-ZaZ0-9 ,.-]+$', re.IGNORECASE)
+    for sub in indi.sub_records:
+        if sub.tag == 'NOTE' and sub.value:
+            note = str(sub.value)
+            already_matched = set()
+            # 5a. Match 'born in ...', etc.
+            for match in place_re.finditer(note):
+                bp = match.group(1).strip()
+                if bp:
+                    birth_details.append({
+                        'event': 'NOTE',
+                        'date': None,
+                        'places': [(bp, 'NOTE')]
+                    })
+                    already_matched.add(bp)
+            # 5b. Match 'Birthplace: ...'
+            for match in birthplace_re.finditer(note):
+                bp = match.group(1).strip()
+                if bp:
+                    birth_details.append({
+                        'event': 'NOTE',
+                        'date': None,
+                        'places': [(bp, 'NOTE/Birthplace')]
+                    })
+                    already_matched.add(bp)
+            # 5c. Match lines that look like a place (not already matched)
+            for line in note.splitlines():
+                line = line.strip()
+                # New: If line contains a comma and is not a year, treat as possible birthplace
+                if (',' in line and not line.isdigit() and len(line) > 8 and line not in already_matched):
+                    birth_details.append({
+                        'event': 'NOTE',
+                        'date': None,
+                        'places': [(line, 'NOTE/CommaLine')]
+                    })
+                elif place_like_re.match(line):
+                    if len(line) > 8 and not line.isdigit() and line not in already_matched:
+                        birth_details.append({
+                            'event': 'NOTE',
+                            'date': None,
+                            'places': [(line, 'NOTE/PlaceLine')]
+                        })
+    # Print all details
+    for detail in birth_details:
+        print(f"  {detail['event']} event:")
+        if detail['date']:
+            print(f"    Date: {detail['date']}")
+        if detail['places']:
+            for idx, (bp, tag) in enumerate(detail['places'], 1):
+                print(f"    Place {idx}: {bp} [{tag}]")
+        else:
+            print("    Place: Unknown")
+    if not birth_details:
+        print("  No birth details found from any tag.")
+
 def main():
     ancestor_ids = None
     restrict = input("Restrict to direct ancestors of a root individual? (y/n): ").strip().lower() == 'y'
@@ -606,7 +732,8 @@ def main():
                 if len(matches) == 1:
                     indi, indi_name, indi_birth_year = matches[0]
                     print(f"Match found: {indi_name} (Birth Year: {indi_birth_year})")
-                    confirm = input("Use this individual as root ancestor? (y/n): ").strip().lower()
+                    confirm = input("Use this individual as root ancestor? (y/n): ")
+
                     if confirm == 'y':
                         root_indi = indi
                         indi_map, fam_map = build_record_maps(parser)
@@ -653,17 +780,17 @@ def main():
     while True:
         print("Select a query to run:")
         print("0. Show 10 most recent ancestors of a person (by name and birth year)")
-        print("1. Show all males named Moss over 40 (alive or died past 40)")
-        print("2. Show all people over 100 with no death date (likely data errors)")
-        print("3. Show anyone with a negative age (death before birth or birth in the future)")
+        print("1. Show anyone with a negative age (death before birth or birth in the future)")
         if not ancestor_ids:  # Only show orphaned individuals if not restricting to ancestors/descendants
-            print("4. Show orphaned individuals (not referenced by or referencing any family)")
-        print("5. Show anyone born in Ireland, Ulster, France, Holland, or Germany")
-        print("6. Show anyone born in Scotland")
-        print("7. Show people born longest ago (oldest ancestors)")
-        print("8. Show counts of birth places grouped by nation (England/Wales/Scotland)")
-        print("9. Show counts of birth places with Flintshire and Cheshire as separate (grouped under nations)")
-        print("10. Show counts of occupations (grouped by occupation)")
+            print("2. Show orphaned individuals (not referenced by or referencing any family)")
+        print("3. Show anyone born in Ireland, Ulster, France, Holland, or Germany")
+        print("4. Show anyone born in Scotland")
+        print("5. Show people born longest ago (oldest ancestors)")
+        print("6. Show counts of birth places grouped by nation (England/Wales/Scotland)")
+        print("7. Show counts of birth places with group counts for nations and their counties")
+        print("8. Show counts of occupations (grouped by occupation)")
+        print("9. Multiple birth places given (list individuals with >1 birthplace)")
+        print("10. Show all birth details (dates and places) for a selected person")
         choice = input("Choose 0-10: ").strip()
         if choice == '0':
             with GedcomReader(file_path) as parser:
@@ -688,32 +815,34 @@ def main():
                         return
                 print_most_recent_ancestors(parser, indi, max_count=10)
             return
-        if choice == '7':
+        if choice == '5':
             with GedcomReader(file_path) as parser:
                 query_oldest_people(parser, ancestor_ids)
-        elif choice == '8':
+        elif choice == '6':
             with GedcomReader(file_path) as parser:
                 query_birthplace_counts(parser, ancestor_ids, show_counties=False)
-        elif choice == '9':
+        elif choice == '7':
             with GedcomReader(file_path) as parser:
                 query_birthplace_counts(parser, ancestor_ids, show_counties=True)
-        elif choice == '10':
+        elif choice == '8':
             with GedcomReader(file_path) as parser:
                 query_occupation_counts(parser, ancestor_ids)
+        elif choice == '9':
+            with GedcomReader(file_path) as parser:
+                query_multiple_birth_places(parser, ancestor_ids)
+        elif choice == '10':
+            with GedcomReader(file_path) as parser:
+                query_birth_details_for_person(parser, ancestor_ids)
         else:
             descending = get_sort_order()
             with GedcomReader(file_path) as parser:
                 if choice == '1':
-                    query_male_moss_over_40(parser, descending, ancestor_ids)
-                elif choice == '2':
-                    query_over_100_no_death(parser, descending, ancestor_ids)
-                elif choice == '3':
                     query_negative_age(parser, descending, ancestor_ids)
-                elif choice == '4' and not ancestor_ids:
+                elif choice == '2' and not ancestor_ids:
                     query_orphaned_individuals(parser, descending, ancestor_ids)
-                elif choice == '5':
+                elif choice == '3':
                     query_birth_in_selected_places(parser, descending, ancestor_ids)
-                elif choice == '6':
+                elif choice == '4':
                     query_birth_in_scotland(parser, descending, ancestor_ids)
                 else:
                     print("Invalid choice.")
