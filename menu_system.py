@@ -1,0 +1,619 @@
+"""
+Menu system for the Family Tree Analyser v2.
+Dynamically builds menu options based on available database capabilities.
+"""
+
+from typing import Dict, List, Tuple, Optional, Callable
+from gedcom_db import GedcomDB
+from query_handlers import SearchQueryHandler, ValidityQueryHandler, ReportQueryHandler, DataQueryHandler
+
+
+class MenuOption:
+    """Represents a single menu option."""
+    
+    def __init__(self, key: str, description: str, handler: Callable, 
+                 category: str = "general", required_capabilities: List[str] = None):
+        self.key = key
+        self.description = description
+        self.handler = handler
+        self.category = category
+        self.required_capabilities = required_capabilities or []
+    
+    def is_available(self, database: GedcomDB) -> bool:
+        """Check if this option is available given the database capabilities."""
+        return all(database.supports(cap) for cap in self.required_capabilities)
+
+
+class MenuCategory:
+    """Represents a category of menu options."""
+    
+    def __init__(self, name: str, description: str, key: str):
+        self.name = name
+        self.description = description
+        self.key = key
+        self.options: List[MenuOption] = []
+
+
+class MenuSystem:
+    """Manages the interactive menu system with categorized options."""
+    
+    def __init__(self, database: GedcomDB):
+        self.database = database
+        self.categories: Dict[str, MenuCategory] = {}
+        self.options: Dict[str, MenuOption] = {}
+        self.ancestor_filter_ids: Optional[set] = None
+        self.current_category: Optional[str] = None
+        
+        # Initialize query handlers
+        self.search_handler = SearchQueryHandler(database)
+        self.validity_handler = ValidityQueryHandler(database)
+        self.report_handler = ReportQueryHandler(database)
+        self.data_handler = DataQueryHandler(database)
+        
+        self._setup_categories()
+        self._register_menu_options()
+    
+    def update_validity_handler_context(self):
+        """Update validity handler with current context (like ancestor filtering)."""
+        self.validity_handler.set_ancestor_filter(self.ancestor_filter_ids)
+        self.search_handler.set_ancestor_filter(self.ancestor_filter_ids)
+    
+    def _setup_categories(self):
+        """Initialize menu categories."""
+        self.categories = {
+            "v": MenuCategory("Validity Tests", 
+                                   "Data quality and consistency checks", "v"),
+            "s": MenuCategory("Search & Navigation", 
+                                 "Find individuals and set analysis scope", "s"),
+            "r": MenuCategory("Analysis Reports", 
+                                 "Generate statistics and analysis reports", "r"),
+            "d": MenuCategory("Data Management", 
+                               "Import, export, and modify data", "d")
+        }
+    
+    def _register_menu_options(self):
+        """Register all available menu options organized by category."""
+        
+        # Note: Handlers are placeholders for now - will be implemented later
+        
+        # === VALIDITY TESTS ===
+        self._add_option("1", "Show individuals with negative ages", 
+                        self.validity_handler.find_individuals_with_negative_ages, "v", ["read", "dates"])
+        
+        self._add_option("2", "Show orphaned individuals (no family connections)", 
+                        self.validity_handler.find_orphaned_individuals, "v", ["read", "relationships"])
+        
+        self._add_option("3", "To Do - Show individuals with missing critical data", 
+                        self._placeholder_handler, "v", ["read"])
+        
+        self._add_option("4", "To Do - Show individuals with duplicate names/dates", 
+                        self._placeholder_handler, "v", ["read"])
+        
+        # === SEARCH & NAVIGATION ===
+        self._add_option("1", "Find individual by name", 
+                        self.search_handler.find_individual_by_name, "s", ["read", "search"])
+        
+        self._add_option("2", "To Do - Show recent ancestors of a person", 
+                        self._placeholder_handler, "s", ["read", "relationships"])
+        
+        self._add_option("3", "To Do - Clear ancestor filter (analyze all individuals)", 
+                        self._placeholder_handler, "s", ["read"])
+        
+        # === ANALYSIS REPORTS ===
+        self._add_option("1", "To Do - Birth place analysis (by nation)", 
+                        self._placeholder_handler, "r", ["read", "places"])
+        
+        self._add_option("2", "To Do - Birth place analysis (with counties/cities)", 
+                        self._placeholder_handler, "r", ["read", "places"])
+        
+        self._add_option("3", "To Do - Birth places: Ireland, Ulster, France, Holland, Germany", 
+                        self._placeholder_handler, "r", ["read", "places"])
+        
+        self._add_option("4", "To Do - Birth places: Scotland", 
+                        self._placeholder_handler, "r", ["read", "places"])
+        
+        self._add_option("5", "To Do - Occupation analysis and counts", 
+                        self._placeholder_handler, "r", ["read", "occupations"])
+        
+        self._add_option("6", "To Do - Oldest individuals (by birth year)", 
+                        self._placeholder_handler, "r", ["read", "dates"])
+        
+        self._add_option("7", "To Do - Individuals with multiple birth places", 
+                        self._placeholder_handler, "r", ["read", "places"])
+        
+        self._add_option("8", "To Do - Detailed birth information for individual", 
+                        self._placeholder_handler, "r", ["read", "places", "dates"])
+        
+        # === DATA MANAGEMENT ===
+        self._add_option("1", "To Do - Export analysis results to file", 
+                        self._placeholder_handler, "d", ["read", "export"])
+        
+        self._add_option("2", "To Do - Save corrected GEDCOM file", 
+                        self._placeholder_handler, "d", ["read", "write"])
+        
+        self._add_option("3", "To Do - Import additional data", 
+                        self._placeholder_handler, "d", ["read", "write"])
+    
+    def _add_option(self, key: str, description: str, handler: Callable, 
+                   category: str, required_capabilities: List[str]):
+        """Add a menu option to the specified category."""
+        option = MenuOption(key, description, handler, category, required_capabilities)
+        
+        # Create composite key for global lookup
+        composite_key = f"{category}:{key}"
+        self.options[composite_key] = option
+        
+        # Add to category
+        if category in self.categories:
+            self.categories[category].options.append(option)
+    
+    def get_available_categories(self) -> List[MenuCategory]:
+        """Get list of categories that have available options."""
+        available_categories = []
+        
+        for category in self.categories.values():
+            # Check if category has any available options
+            available_options = [opt for opt in category.options 
+                               if opt.is_available(self.database) and 
+                               self._is_option_contextually_available(opt)]
+            
+            if available_options:
+                available_categories.append(category)
+        
+        return available_categories
+    
+    def get_available_options_in_category(self, category_key: str) -> List[MenuOption]:
+        """Get list of options available in a specific category."""
+        if category_key not in self.categories:
+            return []
+        
+        category = self.categories[category_key]
+        available = []
+        
+        for option in category.options:
+            if (option.is_available(self.database) and 
+                self._is_option_contextually_available(option)):
+                available.append(option)
+        
+        return available
+    
+    def _is_option_contextually_available(self, option: MenuOption) -> bool:
+        """Check if option is available in current context (e.g., ancestor filtering)."""
+        # Special case: orphaned individuals not available when filtering by ancestors
+        if (option.description.lower().find("orphaned") != -1 and 
+            self.ancestor_filter_ids is not None):
+            return False
+        
+        return True
+    
+    def display_main_menu(self):
+        """Display the main category selection menu."""
+        available_categories = self.get_available_categories()
+        
+        if not available_categories:
+            print("No menu categories available for the current database.")
+            return
+        
+        print("\n" + "="*50)
+        print("Family Tree Analyser v2 - Main Menu")
+        print("="*50)
+        
+        # Show the root ancestor option first
+        if self.ancestor_filter_ids:
+            print("a. (Re)Set Root Ancestor - Reset or change current ancestor filter")
+        else:
+            print("a. (Re)Set Root Ancestor - Filter analysis to specific ancestor lineage")
+        print()
+        
+        for category in available_categories:
+            option_count = len(self.get_available_options_in_category(category.key))
+            print(f"{category.key}. {category.name} ({option_count} options)")
+            print(f"   {category.description}")
+        
+        # Show current state
+        if self.ancestor_filter_ids:
+            print(f"\nCurrently filtering to {len(self.ancestor_filter_ids)} ancestors.")
+        else:
+            print(f"\nAnalyzing all individuals in database.")
+        
+        # Show database info
+        caps = sorted(self.database.capabilities)
+        print(f"Database: {type(self.database).__name__} | Capabilities: {', '.join(caps)}")
+    
+    def display_category_menu(self, category_key: str):
+        """Display options within a specific category."""
+        if category_key not in self.categories:
+            print(f"Unknown category: {category_key}")
+            return
+        
+        category = self.categories[category_key]
+        available_options = self.get_available_options_in_category(category_key)
+        
+        if not available_options:
+            print(f"No options available in {category.name}.")
+            return
+        
+        print(f"\n--- {category.name} ---")
+        print(f"{category.description}")
+        print()
+        
+        for option in available_options:
+            print(f"{option.key}. {option.description}")
+        
+        print("\nb. Back to main menu")
+    
+    def display_menu(self):
+        """Display the current menu (main or category)."""
+        if self.current_category is None:
+            self.display_main_menu()
+        else:
+            self.display_category_menu(self.current_category)
+    
+    def handle_choice(self, choice: str) -> bool:
+        """Handle user menu choice. Returns True to continue, False to exit."""
+        choice = choice.lower().strip()
+        
+        if choice in ['q', 'quit', 'exit']:
+            return False
+        
+        # Handle navigation
+        if self.current_category is None:
+            # Main menu - category selection or special commands
+            if choice == 'a':
+                # Handle (Re)Set Root Ancestor
+                self._handle_set_root_ancestor()
+                return True
+            elif choice in self.categories:
+                self.current_category = choice
+                return True
+            else:
+                print(f"Invalid choice: '{choice}'")
+                return True
+        else:
+            # Category menu
+            if choice == 'b':
+                self.current_category = None
+                return True
+            
+            # Look for option in current category
+            composite_key = f"{self.current_category}:{choice}"
+            if composite_key in self.options:
+                option = self.options[composite_key]
+                if (option.is_available(self.database) and 
+                    self._is_option_contextually_available(option)):
+                    try:
+                        # Update validity handler with current context
+                        self.update_validity_handler_context()
+                        option.handler()
+                    except Exception as e:
+                        print(f"Error executing option: {e}")
+                else:
+                    print(f"Option '{choice}' is not available with the current database.")
+            else:
+                print(f"Invalid choice: '{choice}'")
+        
+        return True
+    
+    def run(self):
+        """Main menu loop."""
+        print(f"Family Tree Analyser v2")
+        print(f"Using database: {type(self.database).__name__}")
+        print(f"File: {self.database.file_path or 'Not loaded'}")
+        
+        if not self.database.is_loaded:
+            print("Warning: No GEDCOM file loaded.")
+        
+        while True:
+            self.display_menu()
+            
+            if self.current_category is None:
+                choice = input(f"\nChoose a category or 'a' for ancestor filtering (or 'q' to quit): ").strip()
+            else:
+                choice = input(f"\nChoose an option ('b' for back, 'q' to quit): ").strip()
+            
+            if not self.handle_choice(choice):
+                break
+        
+        print("Exiting Family Tree Analyser.")
+    
+    def _handle_set_root_ancestor(self):
+        """Handle the (Re)Set Root Ancestor functionality."""
+        print("\n--- (Re)Set Root Ancestor ---")
+        
+        # If already filtering, offer reset option
+        if self.ancestor_filter_ids:
+            print(f"Currently filtering to {len(self.ancestor_filter_ids)} ancestors.")
+            print("\nOptions:")
+            print("1. Reset to full database (clear ancestor filter)")
+            print("2. Set new root ancestor")
+            print("3. Cancel")
+            
+            choice = input("\nChoose option (1-3): ").strip()
+            
+            if choice == '1':
+                self.ancestor_filter_ids = None
+                self.update_validity_handler_context()
+                print("\n✅ Ancestor filter cleared. Now analyzing all individuals in database.")
+                input("\nPress Enter to continue...")
+                return
+            elif choice == '3':
+                return
+            elif choice != '2':
+                print("Invalid choice.")
+                input("\nPress Enter to continue...")
+                return
+            # If choice == '2', continue to set new ancestor
+        
+        # Get root ancestor selection
+        print("\nSelect a root ancestor to filter analysis.")
+        print("You can search for them by name.")
+        
+        name = input("Enter name to search for: ").strip()
+        if not name:
+            print("No name entered.")
+            input("\nPress Enter to continue...")
+            return
+        
+        # Search for individuals
+        if hasattr(self.database, 'search_individuals_advanced'):
+            results = self.database.search_individuals_advanced(
+                name=name,
+                exact_match=False,
+                min_birth_year=None,
+                max_birth_year=None,
+                min_death_year=None,
+                max_death_year=None
+            )
+        else:
+            print("Search not supported by this database.")
+            input("\nPress Enter to continue...")
+            return
+        
+        if not results:
+            print(f"\nNo individuals found matching '{name}'.")
+            input("\nPress Enter to continue...")
+            return
+        
+        # Display search results and let user select
+        print(f"\nFound {len(results)} individual(s):")
+        for i, individual in enumerate(results, 1):
+            birth_year = individual.birth_year or "Unknown"
+            death_year = individual.death_year or "Living"
+            print(f"{i:3}. {individual.name}")
+            print(f"     Birth: {birth_year} | Death: {death_year}")
+            print(f"     ID: {individual.xref_id}")
+            print()
+        
+        # Get user selection
+        choice = input(f"Select root ancestor (1-{len(results)}, or Enter to cancel): ").strip()
+        if not choice:
+            return
+        
+        try:
+            index = int(choice) - 1
+            if 0 <= index < len(results):
+                selected_ancestor = results[index]
+            else:
+                print(f"Invalid selection. Please choose 1-{len(results)}.")
+                input("\nPress Enter to continue...")
+                return
+        except ValueError:
+            print("Invalid input. Please enter a number.")
+            input("\nPress Enter to continue...")
+            return
+        
+        # Get filtering type
+        print(f"\nSelected root ancestor: {selected_ancestor.name}")
+        print("\nChoose filtering type:")
+        print("1. Direct ancestors only")
+        print("   (Include only the root person and their direct ancestral line)")
+        print("2. Direct ancestors and their relations")
+        print("   (Include ancestors plus siblings, spouses, and children of ancestors)")
+        
+        filter_choice = input("\nChoose filtering type (1-2): ").strip()
+        
+        if filter_choice == '1':
+            # Direct ancestors only
+            ancestor_ids = self._get_direct_ancestors(selected_ancestor)
+            filter_type = "Direct ancestors only"
+        elif filter_choice == '2':
+            # Direct ancestors and their relations
+            ancestor_ids = self._get_ancestors_and_relations(selected_ancestor)
+            filter_type = "Direct ancestors and their relations"
+        else:
+            print("Invalid choice.")
+            input("\nPress Enter to continue...")
+            return
+        
+        # Apply the filter
+        self.ancestor_filter_ids = ancestor_ids
+        self.update_validity_handler_context()
+        
+        print(f"\n✅ Ancestor filter applied successfully!")
+        print(f"Root ancestor: {selected_ancestor.name}")
+        print(f"Filter type: {filter_type}")
+        print(f"Total individuals in filtered analysis: {len(ancestor_ids)}")
+        
+        input("\nPress Enter to continue...")
+    
+    def _get_direct_ancestors(self, root_person) -> set:
+        """Get direct ancestors only (root person + parents, grandparents, etc.)."""
+        ancestor_ids = set()
+        ancestors_to_process = [root_person]
+        
+        while ancestors_to_process:
+            current_person = ancestors_to_process.pop(0)
+            ancestor_ids.add(current_person.xref_id)
+            
+            # Use fast lookup if available
+            if hasattr(self.database, 'get_parents_fast') and self.database._indexes_built:
+                parents = self.database.get_parents_fast(current_person.xref_id)
+            else:
+                # Fallback to slow method - find parents through FAMC (Family as Child)
+                parents = []
+                if hasattr(current_person, 'raw_record') and current_person.raw_record:
+                    for sub in current_person.raw_record.sub_records:
+                        if sub.tag == 'FAMC':
+                            family_id = str(sub.value)
+                            parents.extend(self._get_parents_from_family(family_id))
+            
+            for parent in parents:
+                if parent.xref_id not in ancestor_ids:
+                    ancestors_to_process.append(parent)
+        
+        return ancestor_ids
+    
+    def _get_ancestors_and_relations(self, root_person) -> set:
+        """Get direct ancestors plus their siblings, spouses, and children."""
+        # Start with direct ancestors
+        ancestor_ids = self._get_direct_ancestors(root_person)
+        extended_ids = set(ancestor_ids)
+        
+        # For each direct ancestor, add their relations
+        if hasattr(self.database, '_indexes_built') and self.database._indexes_built:
+            # Use fast lookups
+            for individual_id in ancestor_ids:
+                # Add siblings
+                siblings = self.database.get_siblings_fast(individual_id)
+                for sibling in siblings:
+                    extended_ids.add(sibling.xref_id)
+                
+                # Add spouses
+                spouses = self.database.get_spouses_fast(individual_id)
+                for spouse in spouses:
+                    extended_ids.add(spouse.xref_id)
+                
+                # Add children
+                children = self.database.get_children_fast(individual_id)
+                for child in children:
+                    extended_ids.add(child.xref_id)
+        else:
+            # Fallback to slow method
+            all_individuals = self.database.get_all_individuals()
+            for individual in all_individuals:
+                if individual.xref_id in ancestor_ids:
+                    # Add siblings (people with same parents)
+                    siblings = self._get_siblings(individual)
+                    for sibling in siblings:
+                        extended_ids.add(sibling.xref_id)
+                    
+                    # Add spouses
+                    spouses = self._get_spouses(individual)
+                    for spouse in spouses:
+                        extended_ids.add(spouse.xref_id)
+                    
+                    # Add children
+                    children = self._get_children(individual)
+                    for child in children:
+                        extended_ids.add(child.xref_id)
+        
+        return extended_ids
+    
+    def _get_parents_from_family(self, family_id: str) -> List:
+        """Get parents from a family ID."""
+        if hasattr(self.database, '_family_members') and self.database._indexes_built:
+            # Use fast lookup if available
+            family_members = self.database._family_members.get(family_id, {})
+            parent_ids = family_members.get('parents', set())
+            return [self.database._individual_index[pid] for pid in parent_ids 
+                   if pid in self.database._individual_index]
+        else:
+            # Fallback to slow method
+            parents = []
+            all_individuals = self.database.get_all_individuals()
+            
+            for person in all_individuals:
+                if hasattr(person, 'raw_record') and person.raw_record:
+                    for sub in person.raw_record.sub_records:
+                        if sub.tag == 'FAMS' and str(sub.value) == family_id:
+                            parents.append(person)
+            
+            return parents
+    
+    def _get_siblings(self, individual) -> List:
+        """Get siblings of an individual (people with same parents)."""
+        if hasattr(self.database, 'get_siblings_fast') and self.database._indexes_built:
+            # Use fast lookup if available
+            return self.database.get_siblings_fast(individual.xref_id)
+        else:
+            # Fallback to slow method
+            siblings = []
+            
+            # Find families where this person is a child
+            child_families = []
+            if hasattr(individual, 'raw_record') and individual.raw_record:
+                for sub in individual.raw_record.sub_records:
+                    if sub.tag == 'FAMC':
+                        child_families.append(str(sub.value))
+            
+            # Find other children in those families
+            all_individuals = self.database.get_all_individuals()
+            for person in all_individuals:
+                if person.xref_id != individual.xref_id:  # Don't include self
+                    if hasattr(person, 'raw_record') and person.raw_record:
+                        for sub in person.raw_record.sub_records:
+                            if sub.tag == 'FAMC' and str(sub.value) in child_families:
+                                siblings.append(person)
+                                break
+            
+            return siblings
+    
+    def _get_spouses(self, individual) -> List:
+        """Get spouses of an individual."""
+        if hasattr(self.database, 'get_spouses_fast') and self.database._indexes_built:
+            # Use fast lookup if available
+            return self.database.get_spouses_fast(individual.xref_id)
+        else:
+            # Fallback to slow method
+            spouses = []
+            
+            # Find families where this person is a spouse
+            spouse_families = []
+            if hasattr(individual, 'raw_record') and individual.raw_record:
+                for sub in individual.raw_record.sub_records:
+                    if sub.tag == 'FAMS':
+                        spouse_families.append(str(sub.value))
+            
+            # Find other spouses in those families
+            all_individuals = self.database.get_all_individuals()
+            for person in all_individuals:
+                if person.xref_id != individual.xref_id:  # Don't include self
+                    if hasattr(person, 'raw_record') and person.raw_record:
+                        for sub in person.raw_record.sub_records:
+                            if sub.tag == 'FAMS' and str(sub.value) in spouse_families:
+                                spouses.append(person)
+                                break
+            
+            return spouses
+    
+    def _get_children(self, individual) -> List:
+        """Get children of an individual."""
+        if hasattr(self.database, 'get_children_fast') and self.database._indexes_built:
+            # Use fast lookup if available
+            return self.database.get_children_fast(individual.xref_id)
+        else:
+            # Fallback to slow method
+            children = []
+            
+            # Find families where this person is a spouse/parent
+            parent_families = []
+            if hasattr(individual, 'raw_record') and individual.raw_record:
+                for sub in individual.raw_record.sub_records:
+                    if sub.tag == 'FAMS':
+                        parent_families.append(str(sub.value))
+            
+            # Find children in those families
+            all_individuals = self.database.get_all_individuals()
+            for person in all_individuals:
+                if hasattr(person, 'raw_record') and person.raw_record:
+                    for sub in person.raw_record.sub_records:
+                        if sub.tag == 'FAMC' and str(sub.value) in parent_families:
+                            children.append(person)
+                            break
+            
+            return children
+
+    def _placeholder_handler(self):
+        """Placeholder handler for menu options - to be replaced with actual implementations."""
+        print("This feature is not yet implemented in v2.")
+        print("Functionality will be added in subsequent development phases.")
