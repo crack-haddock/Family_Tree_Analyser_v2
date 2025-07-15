@@ -310,7 +310,7 @@ class MenuSystem:
             if self.current_category is None:
                 choice = input(f"\nChoose a category or 'a' for ancestor filtering (or 'q' to quit): ").strip()
             else:
-                choice = input(f"\nChoose an option ('b' for back, 'q' to quit): ").strip()
+                choice = input(f"\nChoose an option (1-8, 'b' for back, 'q' to quit): ").strip()
             
             if not self.handle_choice(choice):
                 break
