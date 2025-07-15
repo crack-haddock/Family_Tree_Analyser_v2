@@ -345,27 +345,51 @@ class MenuSystem:
                 return
             # If choice == '2', continue to set new ancestor
         
-        # Get root ancestor selection
+        # Step 1: Get root ancestor name
         print("\nSelect a root ancestor to filter analysis.")
-        print("You can search for them by name.")
-        
         name = input("Enter name to search for: ").strip()
         if not name:
             print("No name entered.")
             input("\nPress Enter to continue...")
             return
         
-        # Get birth year constraints first to filter search results
-        min_birth_year, max_birth_year = self._get_birth_year_constraints()
+        # Step 2: Get birth year range for finding the root ancestor
+        print(f"\nEnter birth year range to find the root ancestor '{name}':")
+        print("(Press Enter for open-ended constraints)")
         
-        # Search for individuals
+        start_year_str = input("Earliest birth year for root ancestor: ").strip()
+        end_year_str = input("Latest birth year for root ancestor: ").strip()
+        
+        # Parse birth year constraints for root ancestor search
+        start_year = None
+        end_year = None
+        
+        try:
+            if start_year_str:
+                start_year = int(start_year_str)
+        except ValueError:
+            print(f"Invalid start year format '{start_year_str}'. Using open-ended start.")
+            start_year = None
+            
+        try:
+            if end_year_str:
+                end_year = int(end_year_str)
+        except ValueError:
+            print(f"Invalid end year format '{end_year_str}'. Using open-ended end.")
+            end_year = None
+        
+        # Handle case where end date is before start date
+        if start_year and end_year and end_year < start_year:
+            print(f"Note: End year ({end_year}) is before start year ({start_year}). Swapping them.")
+            start_year, end_year = end_year, start_year
+        
+        # Step 3: Search for individuals matching name and birth year range
         if hasattr(self.database, 'search_individuals_advanced'):
-            # Search for potential ancestors with birth year constraints
             results = self.database.search_individuals_advanced(
                 name=name,
                 exact_match=False,
-                min_birth_year=min_birth_year,
-                max_birth_year=max_birth_year,
+                min_birth_year=start_year,
+                max_birth_year=end_year,
                 min_death_year=None,
                 max_death_year=None
             )
@@ -374,51 +398,79 @@ class MenuSystem:
             input("\nPress Enter to continue...")
             return
         
+        # Handle search results
         if not results:
             constraint_msg = ""
-            if min_birth_year or max_birth_year:
+            if start_year or end_year:
                 constraints = []
-                if min_birth_year:
-                    constraints.append(f"born >= {min_birth_year}")
-                if max_birth_year:
-                    constraints.append(f"born <= {max_birth_year}")
-                constraint_msg = f" with constraints: {' and '.join(constraints)}"
+                if start_year:
+                    constraints.append(f"born >= {start_year}")
+                if end_year:
+                    constraints.append(f"born <= {end_year}")
+                constraint_msg = f" with birth year constraints: {' and '.join(constraints)}"
             
             print(f"\nNo individuals found matching '{name}'{constraint_msg}.")
             input("\nPress Enter to continue...")
             return
         
-        # Display search results and let user select
-        print(f"\nFound {len(results)} individual(s):")
-        for i, individual in enumerate(results, 1):
+        # Step 3: Handle selection based on number of matches
+        selected_ancestor = None
+        
+        if len(results) == 1:
+            # Single match - show and ask for confirmation
+            individual = results[0]
             birth_year = individual.birth_year or "Unknown"
-            death_year = individual.death_year or "Living"
-            print(f"{i:3}. {individual.name}")
-            print(f"     Birth: {birth_year} | Death: {death_year}")
-            print(f"     ID: {individual.xref_id}")
-            print()
-        
-        # Get user selection
-        choice = input(f"Select root ancestor (1-{len(results)}, or Enter to cancel): ").strip()
-        if not choice:
-            return
-        
-        try:
-            index = int(choice) - 1
-            if 0 <= index < len(results):
-                selected_ancestor = results[index]
+            death_year = individual.death_year or "Unknown"
+            
+            print(f"\nFound 1 matching individual:")
+            print(f"  Name: {individual.name}")
+            print(f"  Birth: {birth_year} | Death: {death_year}")
+            print(f"  ID: {individual.xref_id}")
+            
+            choice = input(f"\nUse '{individual.name}' as root ancestor? (y/n): ").strip().lower()
+            if choice in ['y', 'yes']:
+                selected_ancestor = individual
             else:
-                print(f"Invalid selection. Please choose 1-{len(results)}.")
+                print("Selection cancelled.")
                 input("\nPress Enter to continue...")
                 return
-        except ValueError:
-            print("Invalid input. Please enter a number.")
-            input("\nPress Enter to continue...")
-            return
+        else:
+            # Multiple matches - show list and ask for selection
+            print(f"\nFound {len(results)} matching individuals:")
+            for i, individual in enumerate(results, 1):
+                birth_year = individual.birth_year or "Unknown"
+                death_year = individual.death_year or "Unknown"
+                print(f"{i:3}. {individual.name}")
+                print(f"     Birth: {birth_year} | Death: {death_year}")
+                print(f"     ID: {individual.xref_id}")
+                print()
+            
+            choice = input(f"Select root ancestor by number (1-{len(results)}, or Enter to cancel): ").strip()
+            if not choice:
+                print("Selection cancelled.")
+                input("\nPress Enter to continue...")
+                return
+            
+            try:
+                index = int(choice) - 1
+                if 0 <= index < len(results):
+                    selected_ancestor = results[index]
+                else:
+                    print(f"Invalid selection. Please choose 1-{len(results)}.")
+                    input("\nPress Enter to continue...")
+                    return
+            except ValueError:
+                print("Invalid input. Please enter a number.")
+                input("\nPress Enter to continue...")
+                return
+        
+        # Step 4: Get tree constraints (separate from root ancestor constraints)
+        print(f"\nSelected root ancestor: {selected_ancestor.name}")
+        print(f"\nNow set constraints for the family tree analysis:")
+        tree_min_year, tree_max_year = self._get_birth_year_constraints()
         
         # Get filtering type
-        print(f"\nSelected root ancestor: {selected_ancestor.name}")
-        print("\nChoose filtering type:")
+        print(f"\nChoose filtering type:")
         print("1. Direct ancestors only")
         print("   (Include only the root person and their direct ancestral line)")
         print("2. Direct ancestors and their relations")
@@ -428,11 +480,11 @@ class MenuSystem:
         
         if filter_choice == '1':
             # Direct ancestors only
-            ancestor_ids = self._get_direct_ancestors_with_constraints(selected_ancestor, min_birth_year, max_birth_year)
+            ancestor_ids = self._get_direct_ancestors_with_constraints(selected_ancestor, tree_min_year, tree_max_year)
             filter_type = "Direct ancestors only"
         elif filter_choice == '2':
             # Direct ancestors and their relations
-            ancestor_ids = self._get_ancestors_and_relations_with_constraints(selected_ancestor, min_birth_year, max_birth_year)
+            ancestor_ids = self._get_ancestors_and_relations_with_constraints(selected_ancestor, tree_min_year, tree_max_year)
             filter_type = "Direct ancestors and their relations"
         else:
             print("Invalid choice.")
@@ -443,11 +495,14 @@ class MenuSystem:
         self.ancestor_filter_ids = ancestor_ids
         self.update_validity_handler_context()
         
+        # Step 5: Display confirmation with final summary
         print(f"\n✅ Ancestor filter applied successfully!")
         print(f"Root ancestor: {selected_ancestor.name}")
         print(f"Filter type: {filter_type}")
-        self._display_birth_year_summary(min_birth_year, max_birth_year)
-        print(f"Total individuals in filtered analysis: {len(ancestor_ids)}")
+        self._display_birth_year_summary(tree_min_year, tree_max_year)
+        print(f"Total ancestors included in analysis: {len(ancestor_ids)}")
+        
+        input("\nPress Enter to continue...")
         
         input("\nPress Enter to continue...")
     

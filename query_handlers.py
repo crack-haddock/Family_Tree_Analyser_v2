@@ -721,8 +721,8 @@ class ReportQueryHandler:
             'Flintshire': ['Buckley', 'Holywell', 'Mold'],
             'Denbighshire': ['Henllan', 'Ruthin'],
             'Caernarvonshire': ['Bangor'],
-            'Shropshire/Salop': ['Market Drayton', 'Shrewsbury', 'Drayton', 'Church Stretton', 'Broseley'],
-            'Devon/Dorset': ['Dalwood', 'Stockland', 'Musbury'],
+            'Shropshire/Salop': ['Market Drayton', 'Shrewsbury', 'Drayton', 'Church Stretton', 'Broseley', 'Cheswardine'],
+            'Devon/Dorset': ['Dalwood', 'Stockland', 'Musbury', 'Axminster', 'Axmouth', 'Colyton', 'Culderwell', 'Kilmington'],
             # Add more place mappings as needed
         }
         
@@ -782,7 +782,7 @@ class ReportQueryHandler:
         unrecognized_places = set()
         unparseable_places = []  # Changed to list to store individual details
         blank_places = []  # Store individuals with blank birth places
-        incomplete_places = set()  # Store birth places with incomplete classification
+        incomplete_places = {}  # Store birth places with incomplete classification and their individuals
         location_errors = []  # Track misplaced counties/places
         blank_count = 0
         total_processed = 0
@@ -864,7 +864,17 @@ class ReportQueryHandler:
                         is_incomplete = True
                 
                 if is_incomplete:
-                    incomplete_places.add(birth_place)
+                    birth_year = getattr(individual, 'birth_year', None) or "Unknown"
+                    death_year = getattr(individual, 'death_year', None) or "Unknown"
+                    individual_name = getattr(individual, 'name', 'Unknown Name')
+                    
+                    if birth_place not in incomplete_places:
+                        incomplete_places[birth_place] = []
+                    incomplete_places[birth_place].append({
+                        'name': individual_name,
+                        'birth_year': birth_year,
+                        'death_year': death_year
+                    })
                 
                 # Count nation
                 nation_counts[nation] = nation_counts.get(nation, 0) + 1
@@ -1040,10 +1050,32 @@ class ReportQueryHandler:
         
         # Incomplete places (partially classified)
         if incomplete_places:
-            print(f"\n--- INCOMPLETE CLASSIFICATIONS ({len(incomplete_places)}) ---")
-            print("Birth places where not all parts were identified:")
-            for place in sorted(incomplete_places):
-                print(f"  • {place}")
+            total_incomplete_count = sum(len(individuals) for individuals in incomplete_places.values())
+            print(f"\n--- INCOMPLETE CLASSIFICATIONS ({total_incomplete_count}) ---")
+            show_details = input(f"Show individual details for {total_incomplete_count} incomplete classifications? (y/n): ").strip().lower()
+            if show_details in ['y', 'yes']:
+                print("Birth places where not all parts were identified:")
+                # Sort by count (descending) then by place name
+                sorted_incomplete = sorted(incomplete_places.items(), key=lambda x: (-len(x[1]), x[0]))
+                for place, individuals in sorted_incomplete:
+                    count = len(individuals)
+                    print(f"  • '{place}' ({count} occurrence{'s' if count != 1 else ''})")
+                    # Sort individuals by name for consistent display
+                    sorted_individuals = sorted(individuals, key=lambda x: x['name'])
+                    for person in sorted_individuals:
+                        name = person['name']
+                        birth_year = person['birth_year']
+                        death_year = person['death_year']
+                        print(f"    Individual: {name} (Born: {birth_year}, Died: {death_year})")
+                    print()
+            else:
+                print("Birth places where not all parts were identified:")
+                # Sort by count (descending) then by place name  
+                sorted_incomplete = sorted(incomplete_places.items(), key=lambda x: (-len(x[1]), x[0]))
+                for place, individuals in sorted_incomplete:
+                    count = len(individuals)
+                    print(f"  • {place} ({count} occurrence{'s' if count != 1 else ''})")
+                print("(Individual details skipped - use detailed analysis to review)")
         
         # Unrecognized places (partially recognized)
         if unrecognized_places:
