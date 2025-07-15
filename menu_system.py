@@ -57,6 +57,7 @@ class MenuSystem:
         """Update validity handler with current context (like ancestor filtering)."""
         self.validity_handler.set_ancestor_filter(self.ancestor_filter_ids)
         self.search_handler.set_ancestor_filter(self.ancestor_filter_ids)
+        self.report_handler.set_ancestor_filter(self.ancestor_filter_ids)
     
     def _setup_categories(self):
         """Initialize menu categories."""
@@ -100,11 +101,11 @@ class MenuSystem:
                         self._placeholder_handler, "s", ["read"])
         
         # === ANALYSIS REPORTS ===
-        self._add_option("1", "To Do - Birth place analysis (by nation)", 
-                        self._placeholder_handler, "r", ["read", "places"])
+        self._add_option("1", "Birth place analysis (nations summary)", 
+                        self.report_handler.analyze_birth_places_summary, "r", ["read", "places"])
         
-        self._add_option("2", "To Do - Birth place analysis (with counties/cities)", 
-                        self._placeholder_handler, "r", ["read", "places"])
+        self._add_option("2", "Birth place analysis (detailed breakdown)", 
+                        self.report_handler.analyze_birth_places_detailed, "r", ["read", "places"])
         
         self._add_option("3", "To Do - Birth places: Ireland, Ulster, France, Holland, Germany", 
                         self._placeholder_handler, "r", ["read", "places"])
@@ -354,13 +355,17 @@ class MenuSystem:
             input("\nPress Enter to continue...")
             return
         
+        # Get birth year constraints first to filter search results
+        min_birth_year, max_birth_year = self._get_birth_year_constraints()
+        
         # Search for individuals
         if hasattr(self.database, 'search_individuals_advanced'):
+            # Search for potential ancestors with birth year constraints
             results = self.database.search_individuals_advanced(
                 name=name,
                 exact_match=False,
-                min_birth_year=None,
-                max_birth_year=None,
+                min_birth_year=min_birth_year,
+                max_birth_year=max_birth_year,
                 min_death_year=None,
                 max_death_year=None
             )
@@ -370,7 +375,16 @@ class MenuSystem:
             return
         
         if not results:
-            print(f"\nNo individuals found matching '{name}'.")
+            constraint_msg = ""
+            if min_birth_year or max_birth_year:
+                constraints = []
+                if min_birth_year:
+                    constraints.append(f"born >= {min_birth_year}")
+                if max_birth_year:
+                    constraints.append(f"born <= {max_birth_year}")
+                constraint_msg = f" with constraints: {' and '.join(constraints)}"
+            
+            print(f"\nNo individuals found matching '{name}'{constraint_msg}.")
             input("\nPress Enter to continue...")
             return
         
@@ -414,11 +428,11 @@ class MenuSystem:
         
         if filter_choice == '1':
             # Direct ancestors only
-            ancestor_ids = self._get_direct_ancestors(selected_ancestor)
+            ancestor_ids = self._get_direct_ancestors_with_constraints(selected_ancestor, min_birth_year, max_birth_year)
             filter_type = "Direct ancestors only"
         elif filter_choice == '2':
             # Direct ancestors and their relations
-            ancestor_ids = self._get_ancestors_and_relations(selected_ancestor)
+            ancestor_ids = self._get_ancestors_and_relations_with_constraints(selected_ancestor, min_birth_year, max_birth_year)
             filter_type = "Direct ancestors and their relations"
         else:
             print("Invalid choice.")
@@ -432,10 +446,106 @@ class MenuSystem:
         print(f"\n✅ Ancestor filter applied successfully!")
         print(f"Root ancestor: {selected_ancestor.name}")
         print(f"Filter type: {filter_type}")
+        self._display_birth_year_summary(min_birth_year, max_birth_year)
         print(f"Total individuals in filtered analysis: {len(ancestor_ids)}")
         
         input("\nPress Enter to continue...")
     
+    def _get_direct_ancestors_with_constraints(self, root_person, min_birth_year: Optional[int], 
+                                             max_birth_year: Optional[int]) -> set:
+        """Get direct ancestors with birth year constraints applied."""
+        ancestor_ids = set()
+        ancestors_to_process = [root_person]
+        
+        while ancestors_to_process:
+            current_person = ancestors_to_process.pop(0)
+            
+            # Apply birth year filter
+            birth_year = current_person.birth_year
+            if birth_year is None:
+                # Exclude individuals with no birth year data
+                continue
+            
+            if min_birth_year and birth_year < min_birth_year:
+                continue
+            
+            if max_birth_year and birth_year > max_birth_year:
+                continue
+            
+            # Add to ancestor set
+            ancestor_ids.add(current_person.xref_id)
+            
+            # Use fast lookup if available
+            if hasattr(self.database, 'get_parents_fast') and self.database._indexes_built:
+                parents = self.database.get_parents_fast(current_person.xref_id)
+            else:
+                # Fallback to slow method - find parents through FAMC (Family as Child)
+                parents = []
+                if hasattr(current_person, 'raw_record') and current_person.raw_record:
+                    for sub in current_person.raw_record.sub_records:
+                        if sub.tag == 'FAMC':
+                            family_id = str(sub.value)
+                            parents.extend(self._get_parents_from_family(family_id))
+            
+            for parent in parents:
+                if parent.xref_id not in ancestor_ids:
+                    ancestors_to_process.append(parent)
+        
+        return ancestor_ids
+    
+    def _get_ancestors_and_relations_with_constraints(self, root_person, min_birth_year: Optional[int], 
+                                                    max_birth_year: Optional[int]) -> set:
+        """Get direct ancestors plus their relations with birth year constraints applied."""
+        # Start with direct ancestors (with constraints)
+        ancestor_ids = self._get_direct_ancestors_with_constraints(root_person, min_birth_year, max_birth_year)
+        extended_ids = set(ancestor_ids)
+        
+        # For each direct ancestor, add their relations (also with constraints)
+        if hasattr(self.database, '_indexes_built') and self.database._indexes_built:
+            # Use fast lookups
+            for individual_id in ancestor_ids:
+                # Add siblings
+                siblings = self.database.get_siblings_fast(individual_id)
+                filtered_siblings = self._apply_birth_year_filter(siblings, min_birth_year, max_birth_year)
+                for sibling in filtered_siblings:
+                    extended_ids.add(sibling.xref_id)
+                
+                # Add spouses
+                spouses = self.database.get_spouses_fast(individual_id)
+                filtered_spouses = self._apply_birth_year_filter(spouses, min_birth_year, max_birth_year)
+                for spouse in filtered_spouses:
+                    extended_ids.add(spouse.xref_id)
+                
+                # Add children
+                children = self.database.get_children_fast(individual_id)
+                filtered_children = self._apply_birth_year_filter(children, min_birth_year, max_birth_year)
+                for child in filtered_children:
+                    extended_ids.add(child.xref_id)
+        else:
+            # Fallback to slow method
+            all_individuals = self.database.get_all_individuals()
+            for individual in all_individuals:
+                if individual.xref_id in ancestor_ids:
+                    # Add siblings (people with same parents)
+                    siblings = self._get_siblings(individual)
+                    filtered_siblings = self._apply_birth_year_filter(siblings, min_birth_year, max_birth_year)
+                    for sibling in filtered_siblings:
+                        extended_ids.add(sibling.xref_id)
+                    
+                    # Add spouses
+                    spouses = self._get_spouses(individual)
+                    filtered_spouses = self._apply_birth_year_filter(spouses, min_birth_year, max_birth_year)
+                    for spouse in filtered_spouses:
+                        extended_ids.add(spouse.xref_id)
+                    
+                    # Add children
+                    children = self._get_children(individual)
+                    filtered_children = self._apply_birth_year_filter(children, min_birth_year, max_birth_year)
+                    for child in filtered_children:
+                        extended_ids.add(child.xref_id)
+        
+        return extended_ids
+
     def _get_direct_ancestors(self, root_person) -> set:
         """Get direct ancestors only (root person + parents, grandparents, etc.)."""
         ancestor_ids = set()
@@ -612,6 +722,92 @@ class MenuSystem:
                             break
             
             return children
+
+    def _get_birth_year_constraints(self) -> Tuple[Optional[int], Optional[int]]:
+        """
+        Get optional birth year constraints from user.
+        Returns tuple of (min_birth_year, max_birth_year).
+        Both can be None if no constraint provided.
+        """
+        print("\nBirth year constraints (optional - press Enter to skip):")
+        
+        # Get minimum birth year
+        min_birth_str = input("Exclude ancestors born before year (e.g., 1776): ").strip()
+        min_birth_year = None
+        if min_birth_str:
+            try:
+                min_birth_year = int(min_birth_str)
+            except ValueError:
+                print(f"Invalid year format '{min_birth_str}'. Ignoring minimum constraint.")
+                min_birth_year = None
+        
+        # Get maximum birth year
+        max_birth_str = input("Exclude ancestors born after year (e.g., 1900): ").strip()
+        max_birth_year = None
+        if max_birth_str:
+            try:
+                max_birth_year = int(max_birth_str)
+            except ValueError:
+                print(f"Invalid year format '{max_birth_str}'. Ignoring maximum constraint.")
+                max_birth_year = None
+        
+        # Validate constraints
+        if min_birth_year and max_birth_year and min_birth_year > max_birth_year:
+            print(f"Warning: Minimum year ({min_birth_year}) is after maximum year ({max_birth_year}).")
+            print("This will result in no ancestors being selected.")
+        
+        return min_birth_year, max_birth_year
+    
+    def _apply_birth_year_filter(self, individuals: List, min_birth_year: Optional[int], 
+                                max_birth_year: Optional[int]) -> List:
+        """
+        Filter a list of individuals by birth year constraints.
+        Individuals with no birth year data are excluded.
+        
+        Args:
+            individuals: List of Individual objects to filter
+            min_birth_year: Minimum birth year (inclusive), or None for no minimum
+            max_birth_year: Maximum birth year (inclusive), or None for no maximum
+            
+        Returns:
+            Filtered list of individuals
+        """
+        if not min_birth_year and not max_birth_year:
+            # No constraints - return individuals that have birth years
+            return [ind for ind in individuals if ind.birth_year is not None]
+        
+        filtered = []
+        for individual in individuals:
+            birth_year = individual.birth_year
+            
+            # Exclude individuals with no birth year data
+            if birth_year is None:
+                continue
+            
+            # Check minimum constraint
+            if min_birth_year and birth_year < min_birth_year:
+                continue
+            
+            # Check maximum constraint
+            if max_birth_year and birth_year > max_birth_year:
+                continue
+            
+            filtered.append(individual)
+        
+        return filtered
+    
+    def _display_birth_year_summary(self, min_birth_year: Optional[int], max_birth_year: Optional[int]):
+        """Display a summary of applied birth year constraints."""
+        constraints = []
+        if min_birth_year:
+            constraints.append(f"born >= {min_birth_year}")
+        if max_birth_year:
+            constraints.append(f"born <= {max_birth_year}")
+        
+        if constraints:
+            print(f"Birth year constraints: {' and '.join(constraints)}")
+        else:
+            print("Birth year constraints: None (excluding individuals with no birth year data)")
 
     def _placeholder_handler(self):
         """Placeholder handler for menu options - to be replaced with actual implementations."""

@@ -701,6 +701,546 @@ class ReportQueryHandler:
     
     def __init__(self, database: GedcomDB):
         self.database = database
+        self.ancestor_filter_ids: Optional[set] = None
+        
+        # Nation -> Counties mapping
+        self.nation_counties = {
+            'England': ['Cheshire', 'Shropshire/Salop', 'Lancashire', 'Yorkshire', 'Warwickshire', 'Kent', 'Devon/Dorset', 'Staffordshire'],
+            'Wales': ['Flintshire', 'Denbighshire', 'Caernarvonshire'],
+            'Scotland': [],  # Add Scottish counties as needed
+            'Ireland': [],   # Add Irish counties as needed
+            'Jamaica': [],   # Add Jamaican parishes/counties as needed
+            'USA': [],       # Add US states/counties as needed
+            'France': [],    # Add French departments/regions as needed
+            'Australia': []  # Add Australian states/territories as needed
+        }
+        
+        # County -> Places mapping
+        self.county_places = {
+            'Cheshire': ['Chester', 'Tattenhall', 'Bunbury', 'Burwardsley'],
+            'Flintshire': ['Buckley', 'Holywell', 'Mold'],
+            'Denbighshire': ['Henllan', 'Ruthin'],
+            'Caernarvonshire': ['Bangor'],
+            'Shropshire/Salop': ['Market Drayton', 'Shrewsbury', 'Drayton', 'Church Stretton', 'Broseley'],
+            'Devon/Dorset': ['Dalwood', 'Stockland', 'Musbury'],
+            # Add more place mappings as needed
+        }
+        
+        # Direct Nation -> Places mapping (for places without clear county associations)
+        self.nation_places = {
+            'Scotland': ['Glasgow', 'Edinburgh'],
+            # Add more direct nation-place mappings as needed
+        }
+    
+    def set_ancestor_filter(self, ancestor_filter_ids: Optional[set]):
+        """Set the ancestor filter for analysis operations."""
+        self.ancestor_filter_ids = ancestor_filter_ids
+    
+    def analyze_birth_places_summary(self):
+        """Option 1: Analyze birth places - nations summary only."""
+        print("\n--- Birth Place Analysis: Nations Summary ---")
+        
+        analysis_data = self._analyze_birth_places()
+        self._display_nations_summary(analysis_data)
+        
+        input("\nPress Enter to continue...")
+    
+    def analyze_birth_places_detailed(self):
+        """Option 2: Analyze birth places - detailed breakdown by nation, county, and place."""
+        print("\n--- Birth Place Analysis: Detailed Breakdown ---")
+        
+        analysis_data = self._analyze_birth_places()
+        self._display_detailed_breakdown(analysis_data)
+        
+        input("\nPress Enter to continue...")
+    
+    def _analyze_birth_places(self) -> dict:
+        """
+        Generic birth place analysis - returns structured data for flexible reporting.
+        Used by multiple reporting options.
+        """
+        # Get individuals to analyze (filtered or all)
+        if self.ancestor_filter_ids is not None:
+            print(f"Analyzing birth places for {len(self.ancestor_filter_ids)} filtered individuals...")
+            # Use indexes if available
+            if hasattr(self.database, '_individual_index') and self.database._indexes_built:
+                individuals = [self.database._individual_index[ind_id] 
+                             for ind_id in self.ancestor_filter_ids 
+                             if ind_id in self.database._individual_index]
+            else:
+                # Fallback to scanning all individuals
+                all_individuals = self.database.get_all_individuals()
+                individuals = [ind for ind in all_individuals if ind.xref_id in self.ancestor_filter_ids]
+        else:
+            print("Analyzing birth places for all individuals...")
+            individuals = self.database.get_all_individuals()
+        
+        # Initialize counters
+        nation_counts = {}
+        county_counts = {}
+        place_counts = {}
+        unrecognized_places = set()
+        unparseable_places = []  # Changed to list to store individual details
+        blank_places = []  # Store individuals with blank birth places
+        incomplete_places = set()  # Store birth places with incomplete classification
+        location_errors = []  # Track misplaced counties/places
+        blank_count = 0
+        total_processed = 0
+        
+        # Process each individual
+        for individual in individuals:
+            total_processed += 1
+            birth_place = None
+            
+            # Get birth place from individual
+            if hasattr(individual, 'birth_place') and individual.birth_place:
+                birth_place = individual.birth_place.strip()
+            
+            if not birth_place:
+                blank_count += 1
+                # Store individuals with blank birth places
+                birth_year = getattr(individual, 'birth_year', None) or "Unknown"
+                death_year = getattr(individual, 'death_year', None) or "Unknown"
+                individual_name = getattr(individual, 'name', 'Unknown Name')
+                
+                blank_places.append({
+                    'name': individual_name,
+                    'birth_year': birth_year,
+                    'death_year': death_year
+                })
+                continue
+            
+            # Parse the birth place
+            result = self._parse_birth_place(birth_place)
+            
+            # Check for location errors
+            if result['location_errors']:
+                location_errors.extend(result['location_errors'])
+                # Don't count entries with location errors in the main counts
+                continue
+            
+            if result['nation']:
+                # Successfully categorized (and no location errors)
+                nation = result['nation']
+                county = result['county']
+                place = result['place']
+                
+                # Check if we have fully classified all parts of the birth place
+                # Split the birth place and see if we've identified all meaningful parts
+                place_parts = [part.strip() for part in birth_place.split(',') if part.strip()]
+                if len(place_parts) == 1:
+                    # No commas, try space splitting
+                    space_parts = [part.strip() for part in birth_place.split() if part.strip()]
+                    if len(space_parts) > 1:
+                        place_parts = space_parts
+                
+                # Count how many parts we've identified - improved logic
+                identified_parts = 0
+                total_parts = len(place_parts)
+                
+                # Check what we've identified
+                if nation:
+                    identified_parts += 1
+                if county:
+                    identified_parts += 1  
+                if place:
+                    identified_parts += 1
+                
+                # More flexible incomplete detection:
+                # - If we have 2+ parts but only identified nation, it's incomplete
+                # - If we have 3+ parts but only identified nation+county, it's incomplete
+                # - Always incomplete if we have unidentified parts in multi-part names
+                is_incomplete = False
+                
+                if total_parts >= 2:
+                    if identified_parts == 1 and nation:
+                        # Only nation identified from 2+ parts
+                        is_incomplete = True
+                    elif total_parts >= 3 and identified_parts == 2:
+                        # Only 2 parts identified from 3+ parts
+                        is_incomplete = True
+                    elif identified_parts < total_parts:
+                        # General case: fewer identified than total parts
+                        is_incomplete = True
+                
+                if is_incomplete:
+                    incomplete_places.add(birth_place)
+                
+                # Count nation
+                nation_counts[nation] = nation_counts.get(nation, 0) + 1
+                
+                # Count county if identified
+                if county:
+                    county_key = f"{county}, {nation}"
+                    county_counts[county_key] = county_counts.get(county_key, 0) + 1
+                
+                # Count place if identified
+                if place:
+                    place_key = f"{place}, {county or 'Unknown County'}, {nation}"
+                    place_counts[place_key] = place_counts.get(place_key, 0) + 1
+            
+            elif result['recognized_parts']:
+                # Recognized some parts but couldn't fully categorize
+                unrecognized_places.add(birth_place)
+            else:
+                # Completely unparseable - store with individual details
+                birth_year = getattr(individual, 'birth_year', None) or "Unknown"
+                death_year = getattr(individual, 'death_year', None) or "Unknown"
+                individual_name = getattr(individual, 'name', 'Unknown Name')
+                
+                unparseable_places.append({
+                    'birth_place': birth_place,
+                    'name': individual_name,
+                    'birth_year': birth_year,
+                    'death_year': death_year
+                })
+        
+        return {
+            'total_processed': total_processed,
+            'blank_count': blank_count,
+            'nation_counts': nation_counts,
+            'county_counts': county_counts,
+            'place_counts': place_counts,
+            'unrecognized_places': unrecognized_places,
+            'unparseable_places': unparseable_places,
+            'blank_places': blank_places,
+            'incomplete_places': incomplete_places,
+            'location_errors': location_errors
+        }
+    
+    def _display_nations_summary(self, data: dict):
+        """Display summary report showing only nations."""
+        total_processed = data['total_processed']
+        blank_count = data['blank_count']
+        nation_counts = data['nation_counts']
+        unrecognized_places = data['unrecognized_places']
+        unparseable_places = data['unparseable_places']
+        blank_places = data['blank_places']
+        incomplete_places = data['incomplete_places']
+        location_errors = data['location_errors']
+        
+        print(f"\n{'='*50}")
+        print(f"BIRTH PLACE SUMMARY BY NATIONS")
+        print(f"{'='*50}")
+        print(f"Total individuals: {total_processed}")
+        print(f"With birth place data: {total_processed - blank_count}")
+        print(f"Blank birth places: {blank_count}")
+        
+        if nation_counts:
+            print(f"\n--- NATIONS ---")
+            for nation, count in sorted(nation_counts.items(), key=lambda x: x[1], reverse=True):
+                percentage = (count / (total_processed - blank_count)) * 100
+                print(f"  {nation}: {count} ({percentage:.1f}%)")
+        
+        # Summary of unprocessed
+        total_unprocessed = len(unrecognized_places) + len(unparseable_places)
+        if total_unprocessed > 0:
+            print(f"\nUnprocessed places: {total_unprocessed}")
+            if unrecognized_places:
+                print(f"  Partially recognized: {len(unrecognized_places)}")
+            if unparseable_places:
+                print(f"  Unparseable: {len(unparseable_places)}")
+            print("(Use detailed analysis for breakdown)")
+        
+        # Summary of location errors
+        if location_errors:
+            print(f"\nLocation errors found: {len(location_errors)}")
+            print("(Use detailed analysis for breakdown)")
+        
+        print(f"\n{'='*50}")
+    
+    def _display_detailed_breakdown(self, data: dict):
+        """Display detailed report showing nations, counties, places, and unprocessed items."""
+        total_processed = data['total_processed']
+        blank_count = data['blank_count']
+        nation_counts = data['nation_counts']
+        county_counts = data['county_counts']
+        place_counts = data['place_counts']
+        unrecognized_places = data['unrecognized_places']
+        unparseable_places = data['unparseable_places']
+        blank_places = data['blank_places']
+        incomplete_places = data['incomplete_places']
+        location_errors = data['location_errors']
+        
+        print(f"\n{'='*60}")
+        print(f"DETAILED BIRTH PLACE ANALYSIS")
+        print(f"{'='*60}")
+        print(f"Total individuals processed: {total_processed}")
+        print(f"Individuals with blank birth places: {blank_count}")
+        print(f"Individuals with birth place data: {total_processed - blank_count}")
+        
+        # Nations, counties, and places grouped hierarchically
+        if nation_counts:
+            print(f"\n--- NATIONS, COUNTIES & PLACES ---")
+            # Sort nations by count
+            sorted_nations = sorted(nation_counts.items(), key=lambda x: x[1], reverse=True)
+            for nation, nation_count in sorted_nations:
+                percentage = (nation_count / (total_processed - blank_count)) * 100
+                print(f"{nation}: {nation_count} ({percentage:.1f}%)")
+                
+                # Show counties for this nation
+                nation_counties = []
+                for county_key, county_count in county_counts.items():
+                    if county_key.endswith(f", {nation}"):
+                        county_name = county_key.split(", ")[0]
+                        nation_counties.append((county_name, county_count))
+                
+                if nation_counties:
+                    # Sort counties by count
+                    nation_counties.sort(key=lambda x: x[1], reverse=True)
+                    for county_name, county_count in nation_counties:
+                        county_percentage = (county_count / (total_processed - blank_count)) * 100
+                        print(f"    {county_name}: {county_count} ({county_percentage:.1f}%)")
+                        
+                        # Show places for this county under this nation
+                        county_places = []
+                        for place_key, place_count in place_counts.items():
+                            # Check if this place belongs to the current county and nation
+                            # Format is: "Place, County, Nation"
+                            place_parts = place_key.split(", ")
+                            if len(place_parts) >= 3:
+                                place_name = place_parts[0]
+                                place_county = place_parts[1]
+                                place_nation = place_parts[2]
+                                
+                                if place_county == county_name and place_nation == nation:
+                                    county_places.append((place_name, place_count))
+                        
+                        if county_places:
+                            # Sort places by count
+                            county_places.sort(key=lambda x: x[1], reverse=True)
+                            for place_name, place_count in county_places:
+                                place_percentage = (place_count / (total_processed - blank_count)) * 100
+                                print(f"        {place_name}: {place_count} ({place_percentage:.1f}%)")
+        
+        # Places without clear county associations (direct nation-place mappings)
+        if place_counts:
+            # Find places that weren't shown above (those with "Unknown County" or direct nation mappings)
+            remaining_places = []
+            for place_key, count in place_counts.items():
+                place_parts = place_key.split(", ")
+                if len(place_parts) >= 3:
+                    place_county = place_parts[1]
+                    if place_county == "Unknown County":
+                        remaining_places.append((place_key, count))
+            
+            if remaining_places:
+                print(f"\n--- PLACES WITHOUT CLEAR COUNTY ASSOCIATIONS ---")
+                sorted_remaining = sorted(remaining_places, key=lambda x: x[1], reverse=True)
+                for place_info, count in sorted_remaining:
+                    percentage = (count / (total_processed - blank_count)) * 100
+                    print(f"  {place_info}: {count} ({percentage:.1f}%)")
+        
+        # Location errors
+        if location_errors:
+            print(f"\n--- LOCATION ERRORS ({len(location_errors)}) ---")
+            print("These locations have incorrect nation/county associations:")
+            for error in location_errors:
+                print(f"  • {error}")
+        
+        # Incomplete places (partially classified)
+        if incomplete_places:
+            print(f"\n--- INCOMPLETE CLASSIFICATIONS ({len(incomplete_places)}) ---")
+            print("Birth places where not all parts were identified:")
+            for place in sorted(incomplete_places):
+                print(f"  • {place}")
+        
+        # Unrecognized places (partially recognized)
+        if unrecognized_places:
+            print(f"\n--- UNRECOGNIZED PLACES ({len(unrecognized_places)}) ---")
+            print("These places were partially recognized but couldn't be fully categorized:")
+            for place in sorted(unrecognized_places):
+                print(f"  • {place}")
+        
+        # Unparseable places
+        if unparseable_places:
+            print(f"\n--- UNPARSEABLE PLACES ({len(unparseable_places)}) ---")
+            show_details = input(f"Show individual details for {len(unparseable_places)} unparseable places? (y/n): ").strip().lower()
+            if show_details in ['y', 'yes']:
+                print("These places couldn't be parsed or recognized:")
+                # Sort by birth place name for consistent display
+                sorted_unparseable = sorted(unparseable_places, key=lambda x: x['birth_place'])
+                for entry in sorted_unparseable:
+                    birth_place = entry['birth_place']
+                    name = entry['name']
+                    birth_year = entry['birth_year']
+                    death_year = entry['death_year']
+                    print(f"  • '{birth_place}'")
+                    print(f"    Individual: {name} (Born: {birth_year}, Died: {death_year})")
+                    print()
+            else:
+                print("(Individual details skipped - use detailed analysis to review)")
+        
+        # Blank birth places
+        if blank_places:
+            print(f"\n--- BLANK BIRTH PLACES ({len(blank_places)}) ---")
+            show_details = input(f"Show individual details for {len(blank_places)} individuals with blank birth places? (y/n): ").strip().lower()
+            if show_details in ['y', 'yes']:
+                print("These individuals have no birth place data:")
+                # Sort by name for consistent display
+                sorted_blanks = sorted(blank_places, key=lambda x: x['name'])
+                for entry in sorted_blanks:
+                    name = entry['name']
+                    birth_year = entry['birth_year']
+                    death_year = entry['death_year']
+                    print(f"  • {name} (Born: {birth_year}, Died: {death_year})")
+                print()
+            else:
+                print("(Individual details skipped - use detailed analysis to review)")
+        
+        print(f"\n{'='*60}")
+        
+        if unrecognized_places or unparseable_places or blank_places or location_errors:
+            print("Note: Unrecognized, unparseable, blank, and error locations can be reviewed")
+            print("to improve data quality and mapping tables for future analysis accuracy.")
+        
+        print(f"\n{'='*60}")
+    
+    def _parse_birth_place(self, birth_place: str) -> dict:
+        """
+        Parse a birth place string and categorize it.
+        
+        Returns dict with:
+        - nation: identified nation or None
+        - county: identified county or None  
+        - place: identified place or None
+        - recognized_parts: True if any parts were recognized
+        - location_errors: List of error messages for misplaced locations
+        """
+        place_lower = birth_place.lower().strip()
+        
+        # First try splitting by comma
+        place_parts = [part.strip() for part in birth_place.split(',') if part.strip()]
+        
+        # If only one part (no commas), try splitting by space
+        if len(place_parts) == 1:
+            space_parts = [part.strip() for part in birth_place.split() if part.strip()]
+            if len(space_parts) > 1:
+                place_parts = space_parts
+        
+        result = {
+            'nation': None,
+            'county': None,
+            'place': None,
+            'recognized_parts': False,
+            'location_errors': []
+        }
+        
+        # Check for nations (case insensitive)
+        for nation in self.nation_counties.keys():
+            if nation.lower() in place_lower:
+                result['nation'] = nation
+                result['recognized_parts'] = True
+                break
+        
+        # Check for counties (exact word matching, case insensitive) and detect nation mismatches
+        found_county_nation = None
+        for nation, counties in self.nation_counties.items():
+            for county in counties:
+                county_found = False
+                
+                # Special handling for combined counties
+                if county == 'Devon/Dorset':
+                    for part in place_parts:
+                        part_words = part.lower().split()
+                        if 'devon' in part_words or 'dorset' in part_words:
+                            county_found = True
+                            break
+                elif county == 'Shropshire/Salop':
+                    for part in place_parts:
+                        part_words = part.lower().split()
+                        if 'shropshire' in part_words or 'salop' in part_words:
+                            county_found = True
+                            break
+                else:
+                    # Use exact word matching for other counties
+                    for part in place_parts:
+                        part_words = part.lower().split()
+                        if county.lower() in part_words:
+                            county_found = True
+                            break
+                
+                if county_found:
+                    result['county'] = county
+                    result['recognized_parts'] = True
+                    found_county_nation = nation
+                    
+                    # Check if this county is being associated with the wrong nation
+                    if result['nation'] and result['nation'] != nation:
+                        error_msg = f"'{birth_place}' - County '{county}' belongs to {nation}, not {result['nation']}"
+                        result['location_errors'].append(error_msg)
+                        # Don't override the nation here - keep the error for reporting
+                    elif not result['nation']:
+                        # If we found a county but no nation yet, assign the correct nation
+                        result['nation'] = nation
+                    break
+            if result['county']:
+                break
+        
+        # Check for specific places (exact word matching, case insensitive) and detect county mismatches
+        for county, places in self.county_places.items():
+            for place in places:
+                # Use exact word matching to avoid false positives like "Manchester" matching "Chester"
+                place_found = False
+                for part in place_parts:
+                    part_words = part.lower().split()
+                    if place.lower() in part_words:
+                        place_found = True
+                        break
+                
+                if place_found:
+                    result['place'] = place
+                    result['recognized_parts'] = True
+                    
+                    # Check if this place is being associated with the wrong county
+                    if result['county'] and result['county'] != county:
+                        error_msg = f"'{birth_place}' - Place '{place}' belongs to {county}, not {result['county']}"
+                        result['location_errors'].append(error_msg)
+                        # Don't override the county here - keep the error for reporting
+                    elif not result['county']:
+                        # If we found a place but no county yet, assign the correct county
+                        result['county'] = county
+                        
+                        # Also assign the nation for this county
+                        if not result['nation']:
+                            for nation, counties in self.nation_counties.items():
+                                if county in counties:
+                                    result['nation'] = nation
+                                    break
+                    break
+            if result['place']:
+                break
+        
+        # Check for direct nation-place mappings (places without intermediate counties)
+        if not result['place']:  # Only check if we haven't found a place yet
+            for nation, places in self.nation_places.items():
+                for place in places:
+                    # Use exact word matching
+                    place_found = False
+                    for part in place_parts:
+                        part_words = part.lower().split()
+                        if place.lower() in part_words:
+                            place_found = True
+                            break
+                    
+                    if place_found:
+                        result['place'] = place
+                        result['recognized_parts'] = True
+                        
+                        # Check if this place is being associated with the wrong nation
+                        if result['nation'] and result['nation'] != nation:
+                            error_msg = f"'{birth_place}' - Place '{place}' belongs to {nation}, not {result['nation']}"
+                            result['location_errors'].append(error_msg)
+                            # Don't override the nation here - keep the error for reporting
+                        elif not result['nation']:
+                            # If we found a place but no nation yet, assign the correct nation
+                            result['nation'] = nation
+                        # Note: No county assigned for direct nation-place mappings
+                        break
+                if result['place']:
+                    break
+        
+        return result
 
 
 class DataQueryHandler:
