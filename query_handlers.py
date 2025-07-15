@@ -746,11 +746,23 @@ class ReportQueryHandler:
                 },
                 'Mold': {
                     'local2_places': ['Llanfferes'],
-                    'known_streets': ['High Street']
+                    'known_streets': []
                 },
                 'Broughton': {
                     'local2_places': [],
-                    'known_streets': ['Warren Drive', 'High Street']
+                    'known_streets': []
+                },
+                'Rhes-y-Cae': {
+                    'local2_places': [],
+                    'known_streets': []
+                },
+                'Pentre Halkyn': {
+                    'local2_places': [],
+                    'known_streets': []
+                },
+                'St Asaph': {
+                    'local2_places': [],
+                    'known_streets': []
                 }
             },
             'Denbighshire': {
@@ -825,6 +837,12 @@ class ReportQueryHandler:
                     'known_streets': []
                 },
                 'Kilmington': {
+                    'local2_places': [],
+                    'known_streets': []
+                }
+            },
+            'Staffordshire': {
+                'Tyrly': {
                     'local2_places': [],
                     'known_streets': []
                 }
@@ -1189,29 +1207,29 @@ class ReportQueryHandler:
                                         local2_percentage = (local2_count / total_with_places) * 100
                                         print(f"            {local2_name}: {local2_count} ({local2_percentage:.1f}%)")
                                     
-                                    # Add "Other" for local2 if there are unaccounted local1 individuals
+                                    # Add "Other or Unspecified" for local2 if there are unaccounted local1 individuals
                                     local1_other_count = local1_count - local1_local2_total
                                     if local1_other_count > 0:
                                         local1_other_percentage = (local1_other_count / total_with_places) * 100
-                                        print(f"            Other: {local1_other_count} ({local1_other_percentage:.1f}%)")
+                                        print(f"            Other or Unspecified: {local1_other_count} ({local1_other_percentage:.1f}%)")
                             
-                            # Add "Other" for local1 if there are unaccounted county individuals
+                            # Add "Other or Unspecified" for local1 if there are unaccounted county individuals
                             county_other_count = county_count - county_local1_total
                             if county_other_count > 0:
                                 county_other_percentage = (county_other_count / total_with_places) * 100
-                                print(f"        Other: {county_other_count} ({county_other_percentage:.1f}%)")
+                                print(f"        Other or Unspecified: {county_other_count} ({county_other_percentage:.1f}%)")
                     
-                    # Add "Other" for counties if there are unaccounted nation individuals
+                    # Add "Other or Unspecified" for counties if there are unaccounted nation individuals
                     nation_other_count = nation_count - nation_counties_total
                     if nation_other_count > 0:
                         nation_other_percentage = (nation_other_count / total_with_places) * 100
-                        print(f"    Other: {nation_other_count} ({nation_other_percentage:.1f}%)")
+                        print(f"    Other or Unspecified: {nation_other_count} ({nation_other_percentage:.1f}%)")
             
-            # Add "Other" for nations if there are unaccounted individuals with birth places
+            # Add "Other or Unspecified" for nations if there are unaccounted individuals with birth places
             nations_other_count = total_with_places - total_nation_count
             if nations_other_count > 0:
                 nations_other_percentage = (nations_other_count / total_with_places) * 100
-                print(f"Other: {nations_other_count} ({nations_other_percentage:.1f}%)")
+                print(f"Other or Unspecified: {nations_other_count} ({nations_other_percentage:.1f}%)")
         
         # Places without clear hierarchical associations
         if local1_counts:
@@ -1453,8 +1471,8 @@ class ReportQueryHandler:
             for local1_place, local1_data in county_data.items():
                 local1_found = False
                 for part in place_parts:
-                    part_words = part.lower().split()
-                    if local1_place.lower() in part_words:
+                    # For multi-word places like "Church Stretton", check if the place name appears in the part
+                    if local1_place.lower() in part.lower():
                         local1_found = True
                         break
                 
@@ -1467,8 +1485,8 @@ class ReportQueryHandler:
                         for local2_place in local1_data['local2_places']:
                             local2_found = False
                             for part in place_parts:
-                                part_words = part.lower().split()
-                                if local2_place.lower() in part_words:
+                                # Same fix for local2 places
+                                if local2_place.lower() in part.lower():
                                     local2_found = True
                                     break
                             

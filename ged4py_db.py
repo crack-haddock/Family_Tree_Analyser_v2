@@ -5,7 +5,11 @@ Provides read-only access to GEDCOM files using the ged4py library.
 
 from typing import List, Optional
 from datetime import datetime
+from pathlib import Path
 import re
+import json
+import pickle
+import os
 
 from gedcom_db import GedcomDB, Individual, Family
 
@@ -187,25 +191,50 @@ class Ged4PyGedcomDB(GedcomDB):
         self._spouse_index = {}      # individual_id -> set of spouse_ids
         self._family_members = {}    # family_id -> {'parents': set, 'children': set}
         self._indexes_built = False
+        
+        # Cache configuration
+        self._base_dir = Path(__file__).parent
+        self._cache_dir = self._base_dir / '.cache'
+        self._indexes_dir = self._cache_dir / 'indexes'
+        self._metadata_file = self._cache_dir / 'metadata.json'
+        self._cache_version = "1.0"
     
     def load_file(self, file_path: str) -> bool:
-        """Load GEDCOM file using ged4py."""
+        """Load GEDCOM file using ged4py with intelligent caching."""
         if GedcomReader is None:
             print("Error: ged4py library not available")
             return False
         
         try:
-            self.file_path = file_path
+            # Convert to relative path if absolute
+            if Path(file_path).is_absolute():
+                self.file_path = str(Path(file_path).relative_to(self._base_dir))
+            else:
+                self.file_path = file_path
+            
             # Test that we can open the file
-            with GedcomReader(file_path) as parser:
+            full_path = self._base_dir / self.file_path
+            with GedcomReader(str(full_path)) as parser:
                 # Just test that it opens successfully
                 pass
             self.is_loaded = True
             
-            # Build indexes on load for fast relationship lookups
+            # Try to use cached indexes first
+            if self._should_use_cache():
+                print("Loading cached indexes...")
+                if self._load_indexes_from_cache():
+                    print("Cached indexes loaded successfully.")
+                    return True
+                else:
+                    print("Failed to load cached indexes, rebuilding...")
+            
+            # Build indexes from scratch
             print("Building relationship indexes for fast lookups...")
             self._build_indexes()
-            print("Indexes built successfully.")
+            
+            # Cache the indexes for next time
+            self._save_indexes_to_cache()
+            print("Indexes built and cached successfully.")
             
             return True
         except Exception as e:
@@ -225,8 +254,9 @@ class Ged4PyGedcomDB(GedcomDB):
         self._spouse_index.clear()
         self._family_members.clear()
         
-        with GedcomReader(self.file_path) as parser:
-            # First pass: Index all individuals and families
+        full_path = self._base_dir / self.file_path
+        with GedcomReader(str(full_path)) as parser:
+            # First pass: Index all individuals and families (streaming, not loading all into memory)
             for indi in parser.records0('INDI'):
                 individual = Ged4PyIndividual(indi.xref_id, indi)
                 self._individual_index[indi.xref_id] = individual
@@ -330,8 +360,14 @@ class Ged4PyGedcomDB(GedcomDB):
         if not self.is_loaded:
             return []
         
+        # Use cached index if available for much faster access
+        if self._indexes_built:
+            return list(self._individual_index.values())
+        
+        # Fallback to file parsing
         individuals = []
-        with GedcomReader(self.file_path) as parser:
+        full_path = self._base_dir / self.file_path
+        with GedcomReader(str(full_path)) as parser:
             for indi in parser.records0('INDI'):
                 individuals.append(Ged4PyIndividual(indi.xref_id, indi))
         return individuals
@@ -341,8 +377,14 @@ class Ged4PyGedcomDB(GedcomDB):
         if not self.is_loaded:
             return []
         
+        # Use cached index if available
+        if self._indexes_built:
+            return list(self._family_index.values())
+        
+        # Fallback to file parsing
         families = []
-        with GedcomReader(self.file_path) as parser:
+        full_path = self._base_dir / self.file_path
+        with GedcomReader(str(full_path)) as parser:
             for fam in parser.records0('FAM'):
                 families.append(Ged4PyFamily(fam.xref_id, fam))
         return families
@@ -515,3 +557,187 @@ class Ged4PyGedcomDB(GedcomDB):
                     matches.append(indi_wrapper)
         
         return matches
+
+    # ============ CACHING METHODS ============
+    
+    def _should_use_cache(self) -> bool:
+        """Determine if we can use cached indexes."""
+        try:
+            if not self._metadata_file.exists():
+                return False
+                
+            metadata = self._load_metadata()
+            if not metadata:
+                return False
+            
+            # Check GEDCOM file hasn't changed
+            current_stats = self._get_gedcom_stats()
+            if not current_stats:
+                return False
+            
+            cached_stats = {
+                'gedcom_file': metadata.get('gedcom_file'),
+                'gedcom_size': metadata.get('gedcom_size'),
+                'gedcom_modified': metadata.get('gedcom_modified')
+            }
+            
+            if current_stats != cached_stats:
+                return False
+                
+            # Check cache version compatibility
+            if metadata.get('cache_version') != self._cache_version:
+                return False
+                
+            # Check all index files exist
+            return self._validate_index_files(metadata)
+        except Exception:
+            return False
+    
+    def _get_gedcom_stats(self) -> Optional[dict]:
+        """Get current GEDCOM file stats using relative path."""
+        try:
+            gedcom_path = self._base_dir / self.file_path
+            if not gedcom_path.exists():
+                return None
+                
+            stat = gedcom_path.stat()
+            return {
+                'gedcom_file': self.file_path,  # Store relative path
+                'gedcom_size': stat.st_size,
+                'gedcom_modified': stat.st_mtime
+            }
+        except Exception:
+            return None
+    
+    def _load_metadata(self) -> Optional[dict]:
+        """Load cache metadata from file."""
+        try:
+            with open(self._metadata_file, 'r') as f:
+                return json.load(f)
+        except Exception:
+            return None
+    
+    def _validate_index_files(self, metadata: dict) -> bool:
+        """Check that all expected index files exist."""
+        try:
+            expected_indexes = metadata.get('available_indexes', [])
+            for index_name in expected_indexes:
+                index_file = self._indexes_dir / f"{index_name}.pkl"
+                if not index_file.exists():
+                    return False
+            return True
+        except Exception:
+            return False
+    
+    def _load_indexes_from_cache(self) -> bool:
+        """Load relationship indexes from cache files."""
+        try:
+            # Load relationship indexes only
+            with open(self._indexes_dir / 'parent_index.pkl', 'rb') as f:
+                self._parent_index = pickle.load(f)
+            
+            with open(self._indexes_dir / 'child_index.pkl', 'rb') as f:
+                self._child_index = pickle.load(f)
+            
+            with open(self._indexes_dir / 'spouse_index.pkl', 'rb') as f:
+                self._spouse_index = pickle.load(f)
+            
+            with open(self._indexes_dir / 'family_members.pkl', 'rb') as f:
+                self._family_members = pickle.load(f)
+            
+            # Rebuild individual and family indexes from GEDCOM file
+            full_path = self._base_dir / self.file_path
+            with GedcomReader(str(full_path)) as parser:
+                for indi in parser.records0('INDI'):
+                    individual = Ged4PyIndividual(indi.xref_id, indi)
+                    self._individual_index[indi.xref_id] = individual
+                
+                for fam in parser.records0('FAM'):
+                    family = Ged4PyFamily(fam.xref_id, fam)
+                    self._family_index[fam.xref_id] = family
+            
+            self._indexes_built = True
+            return True
+        except Exception as e:
+            print(f"Error loading cached indexes: {e}")
+            return False
+    
+    def _save_indexes_to_cache(self):
+        """Save relationship indexes to cache files - only the ID mappings, not full objects."""
+        try:
+            # Create cache directories
+            self._cache_dir.mkdir(exist_ok=True)
+            self._indexes_dir.mkdir(exist_ok=True)
+            
+            # Save only the relationship mappings (sets of IDs), not the full objects
+            with open(self._indexes_dir / 'parent_index.pkl', 'wb') as f:
+                pickle.dump(self._parent_index, f)
+            
+            with open(self._indexes_dir / 'child_index.pkl', 'wb') as f:
+                pickle.dump(self._child_index, f)
+            
+            with open(self._indexes_dir / 'spouse_index.pkl', 'wb') as f:
+                pickle.dump(self._spouse_index, f)
+            
+            with open(self._indexes_dir / 'family_members.pkl', 'wb') as f:
+                pickle.dump(self._family_members, f)
+            
+            # Save metadata
+            current_stats = self._get_gedcom_stats()
+            if current_stats:
+                metadata = {
+                    **current_stats,
+                    'indexes_created': datetime.now().timestamp(),
+                    'cache_version': self._cache_version,
+                    'available_indexes': [
+                        'parent_index',
+                        'child_index',
+                        'spouse_index',
+                        'family_members'
+                    ]
+                }
+                
+                with open(self._metadata_file, 'w') as f:
+                    json.dump(metadata, f, indent=2)
+                    
+        except Exception as e:
+            print(f"Warning: Could not save indexes to cache: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def clear_cache(self):
+        """Manually clear the relationship index cache."""
+        try:
+            import shutil
+            if self._cache_dir.exists():
+                shutil.rmtree(self._cache_dir)
+                print("Index cache cleared successfully.")
+            else:
+                print("No cache to clear.")
+        except Exception as e:
+            print(f"Error clearing cache: {e}")
+    
+    def get_cache_info(self) -> dict:
+        """Get information about the current cache state."""
+        info = {
+            'cache_exists': self._metadata_file.exists(),
+            'cache_valid': False,
+            'cache_size': 0,
+            'last_updated': None
+        }
+        
+        if info['cache_exists']:
+            try:
+                metadata = self._load_metadata()
+                if metadata:
+                    info['cache_valid'] = self._should_use_cache()
+                    info['last_updated'] = metadata.get('indexes_created')
+                    
+                    # Calculate cache size
+                    if self._indexes_dir.exists():
+                        total_size = sum(f.stat().st_size for f in self._indexes_dir.iterdir() if f.is_file())
+                        info['cache_size'] = total_size
+            except Exception:
+                pass
+        
+        return info
