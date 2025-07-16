@@ -10,6 +10,7 @@ import re
 import json
 import pickle
 import os
+import time
 
 from gedcom_db import GedcomDB, Individual, Family
 
@@ -221,20 +222,24 @@ class Ged4PyGedcomDB(GedcomDB):
             
             # Try to use cached indexes first
             if self._should_use_cache():
+                start_time = time.time()
                 print("Loading cached indexes...")
                 if self._load_indexes_from_cache():
-                    print("Cached indexes loaded successfully.")
+                    end_time = time.time()
+                    print(f"Cached indexes loaded successfully. ({end_time - start_time:.3f} seconds)")
                     return True
                 else:
                     print("Failed to load cached indexes, rebuilding...")
             
             # Build indexes from scratch
+            start_time = time.time()
             print("Building relationship indexes for fast lookups...")
             self._build_indexes()
             
             # Cache the indexes for next time
             self._save_indexes_to_cache()
-            print("Indexes built and cached successfully.")
+            end_time = time.time()
+            print(f"Indexes built and cached successfully. ({end_time - start_time:.3f} seconds)")
             
             return True
         except Exception as e:

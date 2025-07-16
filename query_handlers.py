@@ -3,6 +3,9 @@ Query handlers for Family Tree Analyser v2.
 Contains implementations for various analysis and search queries.
 """
 
+import json
+import time
+from pathlib import Path
 from typing import List, Optional
 from gedcom_db import GedcomDB, Individual
 
@@ -703,158 +706,117 @@ class ReportQueryHandler:
         self.database = database
         self.ancestor_filter_ids: Optional[set] = None
         
-        # Nation -> Counties mapping
+        # Load place configuration from JSON file
+        self._load_places_config()
+    
+    def _load_places_config(self):
+        """Load place mappings from JSON configuration file."""
+        start_time = time.time()
+        config_file = Path(__file__).parent / 'places_config.json'
+        
+        try:
+            with open(config_file, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+            
+            # Load the mappings from JSON
+            self.nation_counties = config.get('nation_counties', {})
+            self.county_places = config.get('county_places', {})
+            self.nation_places = config.get('nation_places', {})
+            
+            end_time = time.time()
+            print(f"✓ Loaded places configuration ({end_time - start_time:.3f} seconds)")
+            
+        except FileNotFoundError:
+            end_time = time.time()
+            print(f"⚠ Places configuration file not found ({end_time - start_time:.3f} seconds)")
+            print("Using default empty mappings.")
+            self._use_default_mappings()
+        except json.JSONDecodeError as e:
+            print(f"⚠ Error parsing places configuration: {e}")
+            print("Using default empty mappings.")
+            self._use_default_mappings()
+        except Exception as e:
+            print(f"⚠ Unexpected error loading places configuration: {e}")
+            print("Using default empty mappings.")
+            self._use_default_mappings()
+    
+    def _use_default_mappings(self):
+        """Fallback to empty default mappings if config file fails to load."""
         self.nation_counties = {
-            'England': ['Cheshire', 'Shropshire/Salop', 'Lancashire', 'Yorkshire', 'Warwickshire', 'Kent', 'Devon/Dorset', 'Staffordshire'],
-            'Wales': ['Flintshire', 'Denbighshire', 'Caernarvonshire'],
-            'Scotland': [],  # Add Scottish counties as needed
-            'Ireland': [],   # Add Irish counties as needed
-            'Jamaica': [],   # Add Jamaican parishes/counties as needed
-            'USA': [],       # Add US states/counties as needed
-            'France': [],    # Add French departments/regions as needed
-            'Australia': []  # Add Australian states/territories as needed
+            'England': [],
+            'Wales': [],
+            'Scotland': [],
+            'Ireland': [],
+            'Jamaica': [],
+            'USA': [],
+            'France': [],
+            'Australia': []
+        }
+        self.county_places = {}
+        self.nation_places = {}
+    
+    def add_place_to_config(self, place_name: str, county: str, nation: str = None, 
+                           local2_places: List[str] = None, known_streets: List[str] = None):
+        """
+        Add a new place to the configuration and save it back to the JSON file.
+        
+        Args:
+            place_name: Name of the place to add
+            county: County the place belongs to
+            nation: Nation the county belongs to (optional, will try to determine automatically)
+            local2_places: List of smaller places within this place
+            known_streets: List of known streets in this place
+        """
+        # Find the nation for this county if not provided
+        if not nation:
+            for nat, counties in self.nation_counties.items():
+                if county in counties:
+                    nation = nat
+                    break
+            
+            if not nation:
+                print(f"⚠ Could not determine nation for county '{county}'. Please specify nation.")
+                return False
+        
+        # Add county to nation if not already present
+        if nation not in self.nation_counties:
+            self.nation_counties[nation] = []
+        if county not in self.nation_counties[nation]:
+            self.nation_counties[nation].append(county)
+        
+        # Add county section if not present
+        if county not in self.county_places:
+            self.county_places[county] = {}
+        
+        # Add the place
+        self.county_places[county][place_name] = {
+            'local2_places': local2_places or [],
+            'known_streets': known_streets or []
         }
         
-        # Hierarchical County -> Local1 -> Local2 mapping
-        self.county_places = {
-            'Cheshire': {
-                'Chester': {
-                    'local2_places': [],
-                    'known_streets': ['Castle Street', 'High Street']
-                },
-                'Tattenhall': {
-                    'local2_places': [],
-                    'known_streets': []
-                },
-                'Bunbury': {
-                    'local2_places': [],
-                    'known_streets': []
-                },
-                'Burwardsley': {
-                    'local2_places': [],
-                    'known_streets': []
-                }
-            },
-            'Flintshire': {
-                'Buckley': {
-                    'local2_places': [],
-                    'known_streets': []
-                },
-                'Holywell': {
-                    'local2_places': [],
-                    'known_streets': []
-                },
-                'Mold': {
-                    'local2_places': ['Llanfferes'],
-                    'known_streets': []
-                },
-                'Broughton': {
-                    'local2_places': [],
-                    'known_streets': []
-                },
-                'Rhes-y-Cae': {
-                    'local2_places': [],
-                    'known_streets': []
-                },
-                'Pentre Halkyn': {
-                    'local2_places': [],
-                    'known_streets': []
-                },
-                'St Asaph': {
-                    'local2_places': [],
-                    'known_streets': []
-                }
-            },
-            'Denbighshire': {
-                'Henllan': {
-                    'local2_places': [],
-                    'known_streets': []
-                },
-                'Ruthin': {
-                    'local2_places': [],
-                    'known_streets': []
-                }
-            },
-            'Caernarvonshire': {
-                'Bangor': {
-                    'local2_places': [],
-                    'known_streets': []
-                }
-            },
-            'Shropshire/Salop': {
-                'Market Drayton': {
-                    'local2_places': ['Monkhopton'],
-                    'known_streets': ['High Street', 'Shropshire Street']
-                },
-                'Shrewsbury': {
-                    'local2_places': [],
-                    'known_streets': []
-                },
-                'Drayton': {
-                    'local2_places': [],
-                    'known_streets': []
-                },
-                'Church Stretton': {
-                    'local2_places': [],
-                    'known_streets': []
-                },
-                'Broseley': {
-                    'local2_places': [],
-                    'known_streets': []
-                },
-                'Cheswardine': {
-                    'local2_places': [],
-                    'known_streets': []
-                }
-            },
-            'Devon/Dorset': {
-                'Dalwood': {
-                    'local2_places': [],
-                    'known_streets': []
-                },
-                'Stockland': {
-                    'local2_places': [],
-                    'known_streets': []
-                },
-                'Musbury': {
-                    'local2_places': [],
-                    'known_streets': []
-                },
-                'Axminster': {
-                    'local2_places': [],
-                    'known_streets': []
-                },
-                'Axmouth': {
-                    'local2_places': [],
-                    'known_streets': []
-                },
-                'Colyton': {
-                    'local2_places': [],
-                    'known_streets': []
-                },
-                'Culderwell': {
-                    'local2_places': [],
-                    'known_streets': []
-                },
-                'Kilmington': {
-                    'local2_places': [],
-                    'known_streets': []
-                }
-            },
-            'Staffordshire': {
-                'Tyrly': {
-                    'local2_places': [],
-                    'known_streets': []
-                }
+        # Save back to JSON file
+        return self._save_places_config()
+    
+    def _save_places_config(self):
+        """Save current place mappings back to the JSON configuration file."""
+        config_file = Path(__file__).parent / 'places_config.json'
+        
+        try:
+            config = {
+                'nation_counties': self.nation_counties,
+                'county_places': self.county_places,
+                'nation_places': self.nation_places
             }
-            # Add more hierarchical mappings as needed
-        }
-        
-        # Direct Nation -> Places mapping (for places without clear county associations)
-        self.nation_places = {
-            'Scotland': ['Glasgow', 'Edinburgh'],
-            # Add more direct nation-place mappings as needed
-        }
+            
+            with open(config_file, 'w', encoding='utf-8') as f:
+                json.dump(config, f, indent=2, ensure_ascii=False)
+            
+            print(f"✓ Saved places configuration to {config_file}")
+            return True
+            
+        except Exception as e:
+            print(f"⚠ Error saving places configuration: {e}")
+            return False
     
     def set_ancestor_filter(self, ancestor_filter_ids: Optional[set]):
         """Set the ancestor filter for analysis operations."""
@@ -1375,6 +1337,9 @@ class ReportQueryHandler:
         - recognized_parts: True if any parts were recognized
         - location_errors: List of error messages for misplaced locations
         """
+        # Data cleansing: normalize whitespace
+        birth_place = self._cleanse_birth_place_string(birth_place)
+        
         place_lower = birth_place.lower().strip()
         
         # First try splitting by comma
@@ -1470,11 +1435,16 @@ class ReportQueryHandler:
             # First pass: Look for local1 places (main places)
             for local1_place, local1_data in county_data.items():
                 local1_found = False
+                
+                # Check if place name appears in individual parts (for comma-separated)
                 for part in place_parts:
-                    # For multi-word places like "Church Stretton", check if the place name appears in the part
                     if local1_place.lower() in part.lower():
                         local1_found = True
                         break
+                
+                # Also check if place name appears in the original string (for space-separated multi-word places)
+                if not local1_found and local1_place.lower() in place_lower:
+                    local1_found = True
                 
                 if local1_found:
                     result['local1'] = local1_place
@@ -1484,11 +1454,16 @@ class ReportQueryHandler:
                     if 'local2_places' in local1_data:
                         for local2_place in local1_data['local2_places']:
                             local2_found = False
+                            
+                            # Check if local2 place appears in individual parts
                             for part in place_parts:
-                                # Same fix for local2 places
                                 if local2_place.lower() in part.lower():
                                     local2_found = True
                                     break
+                            
+                            # Also check if local2 place appears in the original string
+                            if not local2_found and local2_place.lower() in place_lower:
+                                local2_found = True
                             
                             if local2_found:
                                 result['local2'] = local2_place
@@ -1597,6 +1572,66 @@ class ReportQueryHandler:
                     break
         
         return result
+    
+    def _cleanse_birth_place_string(self, birth_place: str) -> str:
+        """
+        Cleanse birth place string by normalizing whitespace and removing common issues.
+        
+        This preprocessing step helps ensure consistent parsing regardless of data quality.
+        
+        Args:
+            birth_place: Raw birth place string from genealogical data
+            
+        Returns:
+            Cleansed birth place string
+        """
+        if not birth_place:
+            return ""
+        
+        # Convert to string if not already (handle None, numbers, etc.)
+        birth_place = str(birth_place)
+        
+        # Basic whitespace normalization
+        birth_place = birth_place.strip()  # Remove leading/trailing whitespace
+        
+        # Replace multiple spaces with single space (but preserve commas)
+        import re
+        birth_place = re.sub(r' +', ' ', birth_place)  # Multiple spaces → single space
+        
+        # Clean up common data entry issues
+        birth_place = re.sub(r' *, *', ', ', birth_place)  # Normalize comma spacing
+        birth_place = re.sub(r'\t+', ' ', birth_place)     # Tabs → spaces
+        birth_place = re.sub(r'\n+', ' ', birth_place)     # Newlines → spaces
+        birth_place = re.sub(r'\r+', ' ', birth_place)     # Carriage returns → spaces
+        
+        # Enhanced comma cleansing - more aggressive approach
+        birth_place = re.sub(r'^,+\s*', '', birth_place)   # Remove leading commas and spaces
+        birth_place = re.sub(r'\s*,+$', '', birth_place)   # Remove trailing commas and spaces
+        birth_place = re.sub(r',+', ',', birth_place)      # Multiple commas → single comma
+        birth_place = re.sub(r'\s*,\s*,+\s*', ', ', birth_place)  # ",," patterns → ", "
+        birth_place = re.sub(r',\s*,+', ',', birth_place)  # ", ," patterns → ","
+        birth_place = re.sub(r'\s*,\s*', ', ', birth_place) # Normalize all comma spacing
+        
+        # Clean up any remaining problematic comma patterns
+        birth_place = re.sub(r'^,\s*', '', birth_place)    # Remove any remaining leading commas
+        birth_place = re.sub(r'\s*,$', '', birth_place)    # Remove any remaining trailing commas
+        
+        # Handle edge case of lone spaces between commas
+        birth_place = re.sub(r',\s+,', ',', birth_place)   # ", ," → ","
+        birth_place = re.sub(r'\s*,\s*', ', ', birth_place) # Final comma spacing normalization
+        
+        # Final cleanup: remove any remaining leading/trailing commas that might have been created
+        birth_place = re.sub(r'^,+\s*', '', birth_place)   # One more pass for leading commas
+        birth_place = re.sub(r'\s*,+$', '', birth_place)   # One more pass for trailing commas
+        
+        # Remove extra punctuation that might interfere
+        birth_place = re.sub(r'[.]{2,}', '', birth_place)  # Multiple periods
+        birth_place = re.sub(r'[;]{2,}', ';', birth_place) # Multiple semicolons
+        
+        # Final whitespace cleanup
+        birth_place = birth_place.strip()
+        
+        return birth_place
 
 
 class DataQueryHandler:
