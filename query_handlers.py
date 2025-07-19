@@ -1920,6 +1920,396 @@ class ReportQueryHandler:
         birth_place = birth_place.strip()
         
         return birth_place
+    
+    def analyze_occupations(self):
+        """Option 3: Analyze occupations for each person in current sub-tree."""
+        print("\n--- Occupation Analysis ---")
+        
+        # Get individuals to analyze (filtered or all)
+        if self.ancestor_filter_ids is not None:
+            print(f"Analyzing occupations for {len(self.ancestor_filter_ids)} filtered individuals...")
+            # Use indexes if available
+            if hasattr(self.database, '_individual_index') and self.database._indexes_built:
+                individuals = [self.database._individual_index[ind_id] 
+                             for ind_id in self.ancestor_filter_ids 
+                             if ind_id in self.database._individual_index]
+            else:
+                # Fallback to scanning all individuals
+                all_individuals = self.database.get_all_individuals()
+                individuals = [ind for ind in all_individuals if ind.xref_id in self.ancestor_filter_ids]
+        else:
+            print("Analyzing occupations for all individuals...")
+            individuals = self.database.get_all_individuals()
+        
+        # Debug mode: Ask user if they want to see raw data structure
+        debug_choice = input("Show raw record structure for debugging? (y/n): ").strip().lower()
+        if debug_choice in ['y', 'yes']:
+            self._debug_occupation_extraction = True
+            print("\n--- DEBUG MODE: Raw Record Structure ---")
+            print("Looking for individuals from census period (1841-1921) with potential occupation data...")
+            
+            # Show structure for individuals from census period
+            debug_count = 0
+            census_individuals = []
+            
+            # First, find individuals from the census period
+            for individual in individuals:
+                if hasattr(individual, 'birth_year') and individual.birth_year:
+                    # Look for people born between 1820-1900 (would be adults during census period)
+                    if 1820 <= individual.birth_year <= 1900:
+                        census_individuals.append(individual)
+            
+            if not census_individuals:
+                print("No individuals found from census period, showing first 3 individuals instead...")
+                census_individuals = individuals[:3]
+            else:
+                print(f"Found {len(census_individuals)} individuals from census period, showing first 5...")
+                census_individuals = census_individuals[:5]
+            
+            for individual in census_individuals:
+                if debug_count >= 5:
+                    break
+                if hasattr(individual, 'raw_record') and individual.raw_record:
+                    print(f"\nDEBUG Individual: {individual.name} (ID: {individual.xref_id})")
+                    if hasattr(individual, 'birth_year') and individual.birth_year:
+                        print(f"  Birth Year: {individual.birth_year}")
+                    
+                    print("Available tags in raw record:")
+                    for sub in individual.raw_record.sub_records:
+                        # Handle different value types safely
+                        try:
+                            if sub.value:
+                                # Convert value to string safely
+                                value_str = str(sub.value)
+                                if len(value_str) > 100:
+                                    value_display = value_str[:100] + "..."
+                                else:
+                                    value_display = value_str
+                                print(f"  {sub.tag}: {value_display}")
+                            else:
+                                print(f"  {sub.tag}: [no value]")
+                                
+                            # Show sub-records for key event tags AND source/note tags
+                            if sub.tag in ['BIRT', 'DEAT', 'RESI', 'MARR', 'CENS', 'EVEN', 'FACT', 'BAPM', 'BURI', 'NOTE', 'SOUR']:
+                                try:
+                                    if hasattr(sub, 'sub_records') and sub.sub_records:
+                                        for sub2 in sub.sub_records:
+                                            if sub2.value:
+                                                sub_value_str = str(sub2.value)
+                                                if len(sub_value_str) > 80:
+                                                    sub_value_display = sub_value_str[:80] + "..."
+                                                else:
+                                                    sub_value_display = sub_value_str
+                                                print(f"    └─ {sub2.tag}: {sub_value_display}")
+                                            else:
+                                                print(f"    └─ {sub2.tag}: [no value]")
+                                                
+                                            # Show third level for source records
+                                            if sub2.tag in ['TEXT', 'NOTE', 'DATA'] and hasattr(sub2, 'sub_records') and sub2.sub_records:
+                                                for sub3 in sub2.sub_records:
+                                                    if sub3.value:
+                                                        sub3_value_str = str(sub3.value)
+                                                        if len(sub3_value_str) > 60:
+                                                            sub3_value_display = sub3_value_str[:60] + "..."
+                                                        else:
+                                                            sub3_value_display = sub3_value_str
+                                                        print(f"      └─ {sub3.tag}: {sub3_value_display}")
+                                except Exception as e:
+                                    print(f"    └─ [error reading sub-records: {e}]")
+                                    
+                        except Exception as e:
+                            print(f"  {sub.tag}: [error reading value: {e}]")
+                    debug_count += 1
+            
+            print("\n--- END DEBUG MODE ---")
+            input("Press Enter to continue with occupation analysis...")
+        
+        # Process each individual and collect occupation data
+        individuals_with_occupations = []
+        total_individuals = 0
+        individuals_with_data = 0
+        
+        for individual in individuals:
+            total_individuals += 1
+            occupations = self._extract_occupations(individual)
+            
+            if occupations:
+                individuals_with_data += 1
+                individuals_with_occupations.append({
+                    'individual': individual,
+                    'occupations': occupations
+                })
+        
+        # If still no data found, offer to show all available tags
+        if individuals_with_data == 0 and not debug_choice in ['y', 'yes']:
+            show_all_tags = input("Still no occupation data found. Show all unique tags in dataset? (y/n): ").strip().lower()
+            if show_all_tags in ['y', 'yes']:
+                all_tags = set()
+                for individual in individuals[:20]:  # Check first 20 individuals
+                    if hasattr(individual, 'raw_record') and individual.raw_record:
+                        for sub in individual.raw_record.sub_records:
+                            all_tags.add(sub.tag)
+                
+                print(f"\nUnique tags found in dataset: {sorted(all_tags)}")
+                print("Look for occupation-related tags like OCCU, PROF, TITL, or within CENS/EVEN records.")
+                input("Press Enter to continue...")
+        
+        # Display results
+        print(f"\n{'='*60}")
+        print(f"OCCUPATION ANALYSIS RESULTS")
+        print(f"{'='*60}")
+        print(f"Total individuals processed: {total_individuals}")
+        print(f"Individuals with occupation data: {individuals_with_data}")
+        print(f"Individuals without occupation data: {total_individuals - individuals_with_data}")
+        
+        if individuals_with_occupations:
+            # Count and group occupations
+            occupation_counts = {}
+            all_occupations = []
+            
+            for entry in individuals_with_occupations:
+                for occupation in entry['occupations']:
+                    occ_text = occupation['occupation'].strip()
+                    all_occupations.append(occ_text)
+                    if occ_text in occupation_counts:
+                        occupation_counts[occ_text] += 1
+                    else:
+                        occupation_counts[occ_text] = 1
+            
+            # Display occupation counts first
+            print(f"\n--- OCCUPATION COUNTS ---")
+            print(f"Total occupation entries found: {len(all_occupations)}")
+            print(f"Unique occupations: {len(occupation_counts)}")
+            print(f"\nOccupation frequency (sorted by count):")
+            
+            # Sort by count (descending), then by name
+            sorted_occupations = sorted(occupation_counts.items(), key=lambda x: (-x[1], x[0]))
+            
+            for occupation, count in sorted_occupations:
+                print(f"  {occupation}: {count}")
+            
+            print(f"\n--- INDIVIDUALS WITH OCCUPATIONS ---")
+            
+            # Sort by name for consistent display
+            individuals_with_occupations.sort(key=lambda x: x['individual'].name or 'Unknown')
+            
+            for i, entry in enumerate(individuals_with_occupations, 1):
+                individual = entry['individual']
+                occupations = entry['occupations']
+                
+                # Display individual with number
+                birth_year = individual.birth_year or "Unknown"
+                death_year = individual.death_year or "Unknown"
+                
+                print(f"\n{i:3}. {individual.name}")
+                print(f"     Birth: {birth_year} | Death: {death_year}")
+                print(f"     ID: {individual.xref_id}")
+                
+                # Display occupations indented
+                for occupation in occupations:
+                    if occupation.get('source_info'):
+                        print(f"      • {occupation['occupation']} ({occupation['source_info']})")
+                    else:
+                        print(f"      • {occupation['occupation']}")
+        else:
+            print(f"\nNo occupation data found for any individuals in the current dataset.")
+            print("This could mean:")
+            print("  • The GEDCOM file doesn't contain occupation information")
+            print("  • Occupation data is stored in a different format")
+            print("  • Occupation data is embedded within other record types")
+        
+        # Clean up debug flag
+        if hasattr(self, '_debug_occupation_extraction'):
+            delattr(self, '_debug_occupation_extraction')
+        
+        print(f"\n{'='*60}")
+        input("\nPress Enter to continue...")
+    
+    def _extract_occupations(self, individual) -> list:
+        """
+        Extract occupation information from an individual's record.
+        
+        Returns list of dictionaries with:
+        - occupation: the occupation text
+        - source_info: source and date information (if available)
+        """
+        occupations = []
+        
+        # First, try to use the enhanced get_occupations method from the Individual class
+        if hasattr(individual, 'get_occupations'):
+            try:
+                enhanced_occupations = individual.get_occupations()
+                if enhanced_occupations:
+                    # Convert to the format expected by this method
+                    for occ_data in enhanced_occupations:
+                        occupation_text = occ_data.get('occupation', '').strip()
+                        if occupation_text:
+                            source_parts = []
+                            
+                            # Build source info
+                            source_type = occ_data.get('source', '')
+                            if source_type:
+                                source_parts.append(source_type)
+                            
+                            date_info = occ_data.get('date')
+                            if date_info:
+                                source_parts.append(str(date_info))
+                            
+                            place_info = occ_data.get('place')
+                            if place_info:
+                                source_parts.append(str(place_info))
+                            
+                            occupation_data = {
+                                'occupation': occupation_text,
+                                'source_info': ', '.join(source_parts) if source_parts else None
+                            }
+                            occupations.append(occupation_data)
+                    
+                    # If we found occupations via the enhanced method, return them
+                    if occupations:
+                        return occupations
+            except Exception as e:
+                # If enhanced method fails, fall back to manual extraction
+                if hasattr(self, '_debug_occupation_extraction') and self._debug_occupation_extraction:
+                    print(f"DEBUG: Enhanced occupation method failed for {individual.name}: {e}")
+        
+        # Fallback to manual extraction if enhanced method didn't work
+        if hasattr(individual, 'raw_record') and individual.raw_record:
+            debug_mode = hasattr(self, '_debug_occupation_extraction') and self._debug_occupation_extraction
+            
+            for sub in individual.raw_record.sub_records:
+                if debug_mode:
+                    try:
+                        value_str = str(sub.value) if sub.value else "[no value]"
+                        print(f"DEBUG: Found tag '{sub.tag}' with value: '{value_str[:100]}'")
+                    except Exception as e:
+                        print(f"DEBUG: Found tag '{sub.tag}' with value: [error: {e}]")
+                
+                # Look for occupation in multiple possible tags
+                occupation_value = None
+                try:
+                    if sub.tag == 'OCCU' and sub.value:
+                        occupation_value = str(sub.value).strip()
+                    elif sub.tag == 'PROF' and sub.value:  # Profession
+                        occupation_value = str(sub.value).strip()
+                    elif sub.tag == 'TITL' and sub.value:  # Title (sometimes used for occupation)
+                        occupation_value = str(sub.value).strip()
+                    elif sub.tag.startswith('_') and 'OCCU' in sub.tag.upper() and sub.value:
+                        occupation_value = str(sub.value).strip()
+                    elif sub.tag == 'NOTE' and sub.value:
+                        # Check NOTE fields for occupation data
+                        note_text = str(sub.value).strip()
+                        if 'occupation:' in note_text.lower():
+                            # Parse "Occupation: Coal Miner Hewer; Marital Status: Single; ..."
+                            parts = note_text.split(';')
+                            for part in parts:
+                                part = part.strip()
+                                if part.lower().startswith('occupation:'):
+                                    occupation_value = part[11:].strip()  # Remove "Occupation:" prefix
+                                    break
+                except Exception:
+                    # Skip this tag if we can't convert to string
+                    continue
+                
+                if occupation_value:
+                    # Extract basic occupation
+                    occupation_data = {
+                        'occupation': occupation_value,
+                        'source_info': None
+                    }
+                    
+                    # Look for date and source information in sub-records
+                    date_info = None
+                    source_info = None
+                    
+                    try:
+                        if hasattr(sub, 'sub_records'):
+                            for sub2 in sub.sub_records:
+                                if sub2.tag == 'DATE' and sub2.value:
+                                    date_info = str(sub2.value).strip()
+                                elif sub2.tag == 'SOUR' and sub2.value:
+                                    # Source reference - might contain census or other source info
+                                    source_info = str(sub2.value).strip()
+                                elif sub2.tag == 'NOTE' and sub2.value:
+                                    # Additional notes might contain source information
+                                    if not source_info:
+                                        source_info = str(sub2.value).strip()
+                    except Exception:
+                        # Skip sub-records if there are issues
+                        pass
+                    
+                    # Build source info string
+                    source_parts = []
+                    if source_info:
+                        source_parts.append(source_info)
+                    if date_info:
+                        source_parts.append(date_info)
+                    
+                    if source_parts:
+                        occupation_data['source_info'] = ', '.join(source_parts)
+                    
+                    occupations.append(occupation_data)
+                
+                # Also check for occupations within census records or other events (including RESI)
+                elif sub.tag in ['CENS', 'RESI', 'EVEN', 'FACT']:
+                    try:
+                        # Look for occupation within census or event records
+                        event_occupation = None
+                        event_date = None
+                        event_source = None
+                        
+                        if hasattr(sub, 'sub_records'):
+                            for sub2 in sub.sub_records:
+                                if sub2.tag == 'OCCU' and sub2.value:
+                                    event_occupation = str(sub2.value).strip()
+                                elif sub2.tag == 'DATE' and sub2.value:
+                                    event_date = str(sub2.value).strip()
+                                elif sub2.tag == 'SOUR' and sub2.value:
+                                    event_source = str(sub2.value).strip()
+                                elif sub2.tag == 'NOTE' and sub2.value:
+                                    # Check NOTE within events for occupation data
+                                    note_text = str(sub2.value).strip()
+                                    if 'occupation:' in note_text.lower():
+                                        # Parse "Occupation: Coal Miner Hewer; Marital Status: Single; ..."
+                                        parts = note_text.split(';')
+                                        for part in parts:
+                                            part = part.strip()
+                                            if part.lower().startswith('occupation:'):
+                                                event_occupation = part[11:].strip()  # Remove "Occupation:" prefix
+                                                break
+                                elif sub2.tag == 'TYPE' and sub2.value:
+                                    type_value = str(sub2.value).strip().lower()
+                                    if type_value in ['census', 'occupation']:
+                                        # This might be an occupation event
+                                        if sub.value:
+                                            event_occupation = str(sub.value).strip()
+                        
+                        if event_occupation:
+                            occupation_data = {
+                                'occupation': event_occupation,
+                                'source_info': None
+                            }
+                            
+                            # Build source info for event-based occupation
+                            source_parts = []
+                            if event_source:
+                                source_parts.append(event_source)
+                            if event_date:
+                                source_parts.append(event_date)
+                            elif sub.tag == 'CENS':
+                                source_parts.append('Census')
+                            elif sub.tag == 'RESI':
+                                source_parts.append('Residence')
+                            
+                            if source_parts:
+                                occupation_data['source_info'] = ', '.join(source_parts)
+                            
+                            occupations.append(occupation_data)
+                    except Exception:
+                        # Skip this event record if there are issues
+                        continue
+        
+        return occupations
 
 
 class DataQueryHandler:

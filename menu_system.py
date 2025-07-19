@@ -112,8 +112,8 @@ class MenuSystem:
         self._add_option("2", "Birth place analysis (detailed breakdown)", 
                         self.report_handler.analyze_birth_places_detailed, "r", ["read", "places"])
         
-        self._add_option("3", "To Do - Occupation analysis and counts", 
-                        self._placeholder_handler, "r", ["read", "occupations"])
+        self._add_option("3", "Occupation analysis and counts", 
+                        self.report_handler.analyze_occupations, "r", ["read", "occupations"])
         
         self._add_option("4", "To Do - Oldest individuals (by birth year)", 
                         self._placeholder_handler, "r", ["read", "dates"])

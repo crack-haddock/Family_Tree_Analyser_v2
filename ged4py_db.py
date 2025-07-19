@@ -163,6 +163,135 @@ class Ged4PyIndividual(Individual):
                 break
         return children
 
+    def get_occupations(self) -> List[dict]:
+        """Extract occupation information from various GEDCOM tags and sources."""
+        occupations = []
+        if not self.raw_record:
+            return occupations
+        
+        # Check direct occupation tags
+        for sub in self.raw_record.sub_records:
+            try:
+                # Standard occupation tags
+                if sub.tag in ['OCCU', 'PROF', 'TITL']:
+                    if sub.value:
+                        occ_info = {
+                            'occupation': str(sub.value).strip(),
+                            'source': sub.tag,
+                            'date': None,
+                            'place': None
+                        }
+                        
+                        # Check for date and place in sub-records
+                        if hasattr(sub, 'sub_records'):
+                            for sub2 in sub.sub_records:
+                                if sub2.tag == 'DATE' and sub2.value:
+                                    occ_info['date'] = str(sub2.value).strip()
+                                elif sub2.tag == 'PLAC' and sub2.value:
+                                    occ_info['place'] = str(sub2.value).strip()
+                        
+                        occupations.append(occ_info)
+                
+                # Custom occupation tags (like _OCCU)
+                elif sub.tag.startswith('_') and 'OCCU' in sub.tag.upper():
+                    if sub.value:
+                        occ_info = {
+                            'occupation': str(sub.value).strip(),
+                            'source': f"custom_{sub.tag}",
+                            'date': None,
+                            'place': None
+                        }
+                        occupations.append(occ_info)
+                
+                # Check NOTE fields for occupation information
+                elif sub.tag == 'NOTE':
+                    if sub.value:
+                        note_text = str(sub.value).strip().lower()
+                        # Look for occupation keywords in notes
+                        if any(keyword in note_text for keyword in 
+                               ['occupation:', 'profession:', 'trade:', 'job:', 'work:', 'employed', 'occupation']):
+                            occ_info = {
+                                'occupation': str(sub.value).strip(),
+                                'source': 'NOTE_field',
+                                'date': None,
+                                'place': None
+                            }
+                            occupations.append(occ_info)
+                
+                # Check within events for occupation data
+                elif sub.tag in ['CENS', 'RESI', 'EVEN', 'FACT']:
+                    event_date = None
+                    event_place = None
+                    event_occupations = []
+                    
+                    # Look for occupation within the event
+                    if hasattr(sub, 'sub_records'):
+                        for sub2 in sub.sub_records:
+                            if sub2.tag == 'DATE' and sub2.value:
+                                event_date = str(sub2.value).strip()
+                            elif sub2.tag == 'PLAC' and sub2.value:
+                                event_place = str(sub2.value).strip()
+                            elif sub2.tag in ['OCCU', 'PROF'] and sub2.value:
+                                event_occupations.append(str(sub2.value).strip())
+                            elif sub2.tag == 'NOTE' and sub2.value:
+                                note_text = str(sub2.value).strip()
+                                # Parse occupation from note text like "Occupation: Coal Miner Hewer; Marital Status: Married; ..."
+                                if 'occupation:' in note_text.lower():
+                                    # Extract just the occupation part
+                                    parts = note_text.split(';')
+                                    for part in parts:
+                                        part = part.strip()
+                                        if part.lower().startswith('occupation:'):
+                                            occupation = part[11:].strip()  # Remove "Occupation:" prefix
+                                            if occupation:
+                                                event_occupations.append(occupation)
+                                            break
+                                elif any(keyword in note_text.lower() for keyword in 
+                                       ['profession:', 'trade:', 'job:', 'work:', 'employed']):
+                                    event_occupations.append(note_text)
+                    
+                    # Also check if the main event value contains occupation info
+                    if sub.value:
+                        event_text = str(sub.value).strip()
+                        # Look for occupation-like keywords in residence or census data
+                        if any(keyword in event_text.lower() for keyword in 
+                               ['occupation:', 'profession:', 'trade:', 'job:', 'work:', 'employed as']):
+                            event_occupations.append(event_text)
+                    
+                    # Add any found occupations from this event
+                    for occ_text in event_occupations:
+                        occ_info = {
+                            'occupation': occ_text,
+                            'source': f"{sub.tag}_event",
+                            'date': event_date,
+                            'place': event_place
+                        }
+                        occupations.append(occ_info)
+                
+                # Check SOURCE records for embedded occupation data
+                elif sub.tag == 'SOUR':
+                    # We would need to follow the source reference to get the actual source record
+                    # For now, check if there are any sub-records under the source reference
+                    if hasattr(sub, 'sub_records'):
+                        for sub2 in sub.sub_records:
+                            if sub2.tag in ['TEXT', 'NOTE', 'DATA'] and sub2.value:
+                                text_value = str(sub2.value).strip().lower()
+                                if any(keyword in text_value for keyword in 
+                                       ['occupation:', 'profession:', 'trade:', 'job:', 'work:', 'employed']):
+                                    occ_info = {
+                                        'occupation': str(sub2.value).strip(),
+                                        'source': f"source_{sub2.tag}",
+                                        'date': None,
+                                        'place': None
+                                    }
+                                    occupations.append(occ_info)
+                        
+            except Exception as e:
+                # Continue processing other records if one fails
+                continue
+        
+        return occupations
+
 
 class Ged4PyFamily(Family):
     """Family wrapper for ged4py records."""
