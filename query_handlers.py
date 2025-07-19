@@ -866,6 +866,12 @@ class ReportQueryHandler:
         county_counts = {}
         local1_counts = {}  # Main places (what we used to call "place")
         local2_counts = {}  # Villages/hamlets under main places
+        
+        # NEW: Store original addresses for debugging
+        nation_addresses = {}  # nation -> list of (birth_place, name, year)
+        county_addresses = {}  # "county, nation" -> list of (birth_place, name, year)
+        local1_addresses = {}  # "local1, county, nation" -> list of (birth_place, name, year)
+        
         unrecognized_places = set()
         unparseable_places = []  # Changed to list to store individual details
         blank_places = []  # Store individuals with blank birth places
@@ -902,11 +908,35 @@ class ReportQueryHandler:
             
             # Check for location errors
             if result['location_errors']:
+                # Add person details to each location error
+                for error in result['location_errors']:
+                    if isinstance(error, dict):
+                        error['person_name'] = getattr(individual, 'name', 'Unknown Name')
+                        error['birth_year'] = getattr(individual, 'birth_year', None) or "Unknown"
+                        error['death_year'] = getattr(individual, 'death_year', None) or "Unknown"
+                    else:
+                        # Handle legacy string errors by converting to dict
+                        enhanced_error = {
+                            'error_type': 'legacy',
+                            'message': str(error),
+                            'birth_place': birth_place,
+                            'person_name': getattr(individual, 'name', 'Unknown Name'),
+                            'birth_year': getattr(individual, 'birth_year', None) or "Unknown",
+                            'death_year': getattr(individual, 'death_year', None) or "Unknown"
+                        }
+                        result['location_errors'] = [enhanced_error if e == error else e for e in result['location_errors']]
+                
                 location_errors.extend(result['location_errors'])
                 # Don't count entries with location errors in the main counts
                 continue
             
-            # Track street addresses but don't count them
+            # TEMPORARY DEBUG: Check for Cheshire+Jamaica combination
+            if result['county'] == 'Cheshire' and result['nation'] == 'Jamaica':
+                print(f"\n*** CHESHIRE+JAMAICA DEBUG ***")
+                print(f"Original address: '{birth_place}'")
+                print(f"Person: {getattr(individual, 'name', 'Unknown Name')} (b. {getattr(individual, 'birth_year', None) or 'Unknown'})")
+                print(f"Parsed as: Nation={result['nation']}, County={result['county']}, Local1={result['local1']}")
+                print(f"*** END DEBUG ***\n")            # Track street addresses but don't count them
             if result['local3']:
                 street_addresses.append({
                     'address': result['local3'],
@@ -983,15 +1013,49 @@ class ReportQueryHandler:
                 # Count nation
                 nation_counts[nation] = nation_counts.get(nation, 0) + 1
                 
-                # Count county if identified
+                # Store original address for this nation
+                if nation not in nation_addresses:
+                    nation_addresses[nation] = []
+                person_info = {
+                    'birth_place': birth_place,
+                    'name': getattr(individual, 'name', 'Unknown Name'),
+                    'birth_year': getattr(individual, 'birth_year', None) or "Unknown"
+                }
+                nation_addresses[nation].append(person_info)
+                
+                # Count county if identified (but not for direct nation places or nation-as-county cases)
                 if county:
-                    county_key = f"{county}, {nation}"
-                    county_counts[county_key] = county_counts.get(county_key, 0) + 1
+                    # Skip county counting if this is a direct nation place
+                    is_direct_nation_place = (local1 and 
+                                            nation in self.nation_places and 
+                                            self.nation_places[nation] and 
+                                            local1 in self.nation_places[nation])
+                    
+                    # Also skip if county name equals nation name (e.g., "Scotland, Scotland")
+                    is_nation_as_county = (county == nation)
+                    
+                    if not is_direct_nation_place and not is_nation_as_county:
+                        county_key = f"{county}, {nation}"
+                        county_counts[county_key] = county_counts.get(county_key, 0) + 1
+                        
+                        # Store original address for this county
+                        if county_key not in county_addresses:
+                            county_addresses[county_key] = []
+                        county_addresses[county_key].append(person_info)
                 
                 # Count local1 (main place) if identified
                 if local1:
-                    local1_key = f"{local1}, {county or 'Unknown County'}, {nation}"
+                    # For nations with direct nation places (non-UK + UK nations with nation_places), don't include county in the key
+                    if (nation not in ['England', 'Wales', 'Scotland', 'UK']) or (nation in self.nation_places and self.nation_places[nation] and local1 in self.nation_places[nation]):
+                        local1_key = f"{local1}, {nation}"
+                    else:
+                        local1_key = f"{local1}, {county or 'Unknown County'}, {nation}"
                     local1_counts[local1_key] = local1_counts.get(local1_key, 0) + 1
+                    
+                    # Store original address for this local1
+                    if local1_key not in local1_addresses:
+                        local1_addresses[local1_key] = []
+                    local1_addresses[local1_key].append(person_info)
                 
                 # Count local2 (village/hamlet) if identified
                 if local2:
@@ -1021,6 +1085,9 @@ class ReportQueryHandler:
             'county_counts': county_counts,
             'local1_counts': local1_counts,
             'local2_counts': local2_counts,
+            'nation_addresses': nation_addresses,
+            'county_addresses': county_addresses,
+            'local1_addresses': local1_addresses,
             'unrecognized_places': unrecognized_places,
             'unparseable_places': unparseable_places,
             'blank_places': blank_places,
@@ -1078,6 +1145,9 @@ class ReportQueryHandler:
         county_counts = data['county_counts']
         local1_counts = data['local1_counts']
         local2_counts = data['local2_counts']
+        nation_addresses = data.get('nation_addresses', {})
+        county_addresses = data.get('county_addresses', {})
+        local1_addresses = data.get('local1_addresses', {})
         unrecognized_places = data['unrecognized_places']
         unparseable_places = data['unparseable_places']
         blank_places = data['blank_places']
@@ -1121,6 +1191,14 @@ class ReportQueryHandler:
                     for county_name, county_count in nation_counties:
                         county_percentage = (county_count / total_with_places) * 100
                         print(f"    {county_name}: {county_count} ({county_percentage:.1f}%)")
+                        
+                        # For small datasets, show original addresses
+                        if total_processed <= 50:  # Show addresses for small datasets
+                            county_key = f"{county_name}, {nation}"
+                            if county_key in county_addresses:
+                                print(f"        → Original addresses:")
+                                for addr_info in county_addresses[county_key]:
+                                    print(f"          • '{addr_info['birth_place']}' - {addr_info['name']} (b. {addr_info['birth_year']})")
                         
                         # Show local1 places for this county under this nation
                         county_local1_places = []
@@ -1183,9 +1261,58 @@ class ReportQueryHandler:
                     
                     # Add "Other or Unspecified" for counties if there are unaccounted nation individuals
                     nation_other_count = nation_count - nation_counties_total
-                    if nation_other_count > 0:
+                    
+                    # Check if this nation also has direct nation places
+                    has_direct_nation_places = (nation in self.nation_places and self.nation_places[nation])
+                    
+                    if not has_direct_nation_places and nation_other_count > 0:
                         nation_other_percentage = (nation_other_count / total_with_places) * 100
                         print(f"    Other or Unspecified: {nation_other_count} ({nation_other_percentage:.1f}%)")
+                
+                # For nations with direct nation places (non-UK nations + UK nations with nation_places), show local1 places directly under the nation
+                if (nation not in ['England', 'Wales', 'Scotland', 'UK']) or (nation in self.nation_places and self.nation_places[nation]):
+                    nation_local1_places = []
+                    nation_local1_total = 0
+                    for local1_key, local1_count in local1_counts.items():
+                        # Format for non-UK: "Local1, Nation"
+                        local1_parts = local1_key.split(", ")
+                        if len(local1_parts) == 2:
+                            local1_name = local1_parts[0]
+                            local1_nation = local1_parts[1]
+                            
+                            if local1_nation == nation:
+                                nation_local1_places.append((local1_name, local1_count))
+                                nation_local1_total += local1_count
+                    
+                    if nation_local1_places:
+                        # Sort local1 places by count
+                        nation_local1_places.sort(key=lambda x: x[1], reverse=True)
+                        for local1_name, local1_count in nation_local1_places:
+                            local1_percentage = (local1_count / total_with_places) * 100
+                            print(f"    {local1_name}: {local1_count} ({local1_percentage:.1f}%)")
+                            
+                            # For small datasets, show original addresses
+                            if total_processed <= 50:
+                                local1_key = f"{local1_name}, {nation}"
+                                if local1_key in local1_addresses:
+                                    print(f"        → Original addresses:")
+                                    for addr_info in local1_addresses[local1_key]:
+                                        print(f"          • '{addr_info['birth_place']}' - {addr_info['name']} (b. {addr_info['birth_year']})")
+                    
+                    # For nations with direct nation places, adjust "Other or Unspecified" based on BOTH counties and local1 places
+                    if nation_local1_places:
+                        # For nations with both counties and direct places, account for both
+                        if nation in ['England', 'Wales', 'Scotland', 'UK']:
+                            # UK nations might have both counties and direct places
+                            accounted_total = nation_counties_total + nation_local1_total
+                        else:
+                            # Non-UK nations typically only have direct places
+                            accounted_total = nation_local1_total
+                        
+                        nation_other_count = nation_count - accounted_total
+                        if nation_other_count > 0:
+                            nation_other_percentage = (nation_other_count / total_with_places) * 100
+                            print(f"    Other or Unspecified: {nation_other_count} ({nation_other_percentage:.1f}%)")
             
             # Add "Other or Unspecified" for nations if there are unaccounted individuals with birth places
             nations_other_count = total_with_places - total_nation_count
@@ -1240,9 +1367,26 @@ class ReportQueryHandler:
         # Location errors
         if location_errors:
             print(f"\n--- LOCATION ERRORS ({len(location_errors)}) ---")
-            print("These locations have incorrect nation/county associations:")
+            print("These locations have incorrect geographical associations:")
+            print("(Often caused by data entry errors or unfamiliarity with geography)")
+            print()
+            
             for error in location_errors:
-                print(f"  • {error}")
+                if isinstance(error, dict):
+                    print(f"  • Birth place: '{error.get('birth_place', 'Unknown')}'")
+                    print(f"    Problem: {error.get('message', 'Unknown error')}")
+                    print(f"    Person: {error.get('person_name', 'Unknown')} (Born: {error.get('birth_year', 'Unknown')}, Died: {error.get('death_year', 'Unknown')})")
+                    
+                    if error.get('error_type') == 'county_nation_mismatch':
+                        print(f"    Note: County '{error.get('detected_county')}' belongs to {error.get('expected_nation')}, not {error.get('detected_nation')}")
+                    elif error.get('error_type') == 'uk_nation_nesting':
+                        print(f"    Note: {error.get('note', 'UK nations should not be nested within each other')}")
+                    elif error.get('error_type') == 'nation_misspelling':
+                        print(f"    Note: '{error.get('detected_misspelling')}' might be misspelled '{error.get('suggested_correction')}'")
+                else:
+                    # Legacy string error
+                    print(f"  • {error}")
+                print()
         
         # Incomplete places (partially classified)
         if incomplete_places:
@@ -1323,7 +1467,6 @@ class ReportQueryHandler:
             print("to improve data quality and mapping tables for future analysis accuracy.")
         
         print(f"\n{'='*60}")
-    
     def _parse_birth_place(self, birth_place: str) -> dict:
         """
         Parse a birth place string and categorize it using hierarchical structure.
@@ -1377,59 +1520,164 @@ class ReportQueryHandler:
         # Use remaining parts for geographical analysis
         place_parts = remaining_parts
         
-        # Check for nations (case insensitive)
+        # Check for nations (exact word matching, case insensitive) - prioritize specific nations over UK
+        detected_nations = []
         for nation in self.nation_counties.keys():
-            if nation.lower() in place_lower:
-                result['nation'] = nation
-                result['recognized_parts'] = True
-                break
+            # Use exact word matching to avoid false positives like "Jamaica Street" matching "Jamaica"
+            place_words = place_lower.replace(',', ' ').replace('.', ' ').split()  # Remove punctuation
+            nation_words = nation.lower().split()
+            
+            # For single-word nations, check if the nation appears as a complete word
+            if len(nation_words) == 1:
+                if nation.lower() in place_words:
+                    detected_nations.append(nation)
+            else:
+                # For multi-word nations, check if all words appear consecutively
+                nation_phrase = nation.lower()
+                if nation_phrase in place_lower:
+                    # Additional check: ensure it's word-bounded
+                    import re
+                    pattern = r'\b' + re.escape(nation_phrase) + r'\b'
+                    if re.search(pattern, place_lower):
+                        detected_nations.append(nation)
+        
+        # Filter logic: prefer specific nations over UK
+        if detected_nations:
+            if len(detected_nations) == 1:
+                result['nation'] = detected_nations[0]
+            elif 'UK' in detected_nations and len(detected_nations) > 1:
+                # UK found with other nations - use the specific nation, ignore UK
+                non_uk_nations = [n for n in detected_nations if n != 'UK']
+                if len(non_uk_nations) == 1:
+                    result['nation'] = non_uk_nations[0]
+                else:
+                    # Multiple specific nations found - use the first one
+                    result['nation'] = non_uk_nations[0]
+            else:
+                # Multiple specific nations (no UK) - use the first one
+                result['nation'] = detected_nations[0]
+            result['recognized_parts'] = True
+            
+            # TEMPORARY DEBUG: Check for UK being used when England should be used
+            if result['nation'] == 'UK':
+                # Check if this birth place actually contains England/Wales/Scotland
+                specific_nations = ['England', 'Wales', 'Scotland', 'Northern Ireland']
+                for specific in specific_nations:
+                    if specific.lower() in place_lower:
+                        print(f"DEBUG: UK used instead of {specific}: '{birth_place}'")
+                        print(f"  Detected nations: {detected_nations}")
+                        break
+        else:
+            # No nations detected - could be a parsing issue or genuinely foreign place
+            # Don't try to guess at misspellings - let them fall through to unparseable
+            pass
+        
+        # Determine if we should use UK place/county lookups
+        # Skip UK lookups if a non-UK nation is explicitly mentioned
+        uk_nations = {'UK', 'England', 'Wales', 'Scotland', 'Northern Ireland'}
+        use_uk_lookups = True
+        if result['nation'] and result['nation'] not in uk_nations:
+            use_uk_lookups = False
         
         # Check for counties (exact word matching, case insensitive) and detect nation mismatches
+        # Only do this if we should use UK lookups
         found_county_nation = None
-        for nation, counties in self.nation_counties.items():
-            for county in counties:
-                county_found = False
-                
-                # Special handling for combined counties
-                if county == 'Devon/Dorset':
-                    for part in place_parts:
-                        part_words = part.lower().split()
-                        if 'devon' in part_words or 'dorset' in part_words:
-                            county_found = True
-                            break
-                elif county == 'Shropshire/Salop':
-                    for part in place_parts:
-                        part_words = part.lower().split()
-                        if 'shropshire' in part_words or 'salop' in part_words:
-                            county_found = True
-                            break
-                else:
-                    # Use exact word matching for other counties
-                    for part in place_parts:
-                        part_words = part.lower().split()
-                        if county.lower() in part_words:
-                            county_found = True
-                            break
-                
-                if county_found:
-                    result['county'] = county
-                    result['recognized_parts'] = True
-                    found_county_nation = nation
+        if use_uk_lookups:
+            for nation, counties in self.nation_counties.items():
+                for county in counties:
+                    county_found = False
                     
-                    # Check if this county is being associated with the wrong nation
-                    if result['nation'] and result['nation'] != nation:
-                        error_msg = f"'{birth_place}' - County '{county}' belongs to {nation}, not {result['nation']}"
-                        result['location_errors'].append(error_msg)
-                        # Don't override the nation here - keep the error for reporting
-                    elif not result['nation']:
-                        # If we found a county but no nation yet, assign the correct nation
-                        result['nation'] = nation
+                    # Special handling for combined counties
+                    if county == 'Devon/Dorset':
+                        for part in place_parts:
+                            part_words = part.lower().split()
+                            if 'devon' in part_words or 'dorset' in part_words:
+                                county_found = True
+                                break
+                    elif county == 'Shropshire/Salop':
+                        for part in place_parts:
+                            part_words = part.lower().split()
+                            if 'shropshire' in part_words or 'salop' in part_words:
+                                county_found = True
+                                break
+                    else:
+                        # Use exact word matching for other counties
+                        for part in place_parts:
+                            part_words = part.lower().split()
+                            if county.lower() in part_words:
+                                county_found = True
+                                break
+                    
+                    if county_found:
+                        # Skip if this "county" is actually the already-detected nation
+                        # (e.g., don't treat Wales as a county when Wales is already the nation)
+                        if result['nation'] and county == result['nation']:
+                            continue
+                            
+                        result['county'] = county
+                        result['recognized_parts'] = True
+                        found_county_nation = nation
+                        
+                        # Basic nation assignment if no nation detected yet
+                        if not result['nation']:
+                            # If we found a county but no nation yet, assign the correct nation
+                            result['nation'] = nation
+                        elif result['nation'] == 'UK':
+                            # Special case: if we had "UK" but found a specific county, 
+                            # override UK with the specific nation for that county
+                            result['nation'] = nation
+                        break
+                if result['county']:
                     break
+        
+        # Additional error detection for geographical inconsistencies
+        if result['nation']:
+            # Check for UK nations being incorrectly nested within each other
+            # E.g., "Someplace, Wales, England" or "Town, Scotland, England"
+            remaining_place_text = ' '.join(place_parts).lower()
+            
+            # Define UK nations and their relationships
+            uk_nations = ['england', 'wales', 'scotland', 'northern ireland']
+            detected_nation = result['nation'].lower()
+            
+            # Check if any OTHER UK nation appears in the remaining text
+            for other_nation in uk_nations:
+                if other_nation != detected_nation and other_nation in remaining_place_text:
+                    result['location_errors'].append({
+                        'error_type': 'uk_nation_nesting',
+                        'message': f"'{birth_place}' - {other_nation.title()} appears with {result['nation']} - UK nations should not be nested within each other",
+                        'birth_place': birth_place,
+                        'detected_nation': result['nation'],
+                        'conflicting_nation': other_nation.title(),
+                        'note': f"Both {result['nation']} and {other_nation.title()} are parts of the UK, not parts of each other"
+                    })
+            
+            # Check for obvious English counties listed under Wales/Scotland (and vice versa)
             if result['county']:
-                break
+                expected_nation_for_county = None
+                # Find which nation this county actually belongs to
+                for nation, counties in self.nation_counties.items():
+                    if result['county'] in counties:
+                        expected_nation_for_county = nation
+                        break
+                
+                # If we found the county belongs to a different nation, flag it
+                if (expected_nation_for_county and 
+                    expected_nation_for_county != result['nation'] and
+                    expected_nation_for_county != 'UK'):  # Skip UK super-nation conflicts
+                    
+                    result['location_errors'].append({
+                        'error_type': 'county_nation_mismatch',
+                        'message': f"'{birth_place}' - County '{result['county']}' belongs to {expected_nation_for_county}, not {result['nation']}",
+                        'birth_place': birth_place,
+                        'detected_county': result['county'],
+                        'detected_nation': result['nation'],
+                        'expected_nation': expected_nation_for_county
+                    })
         
         # Check for local1 places (main places) and local2 places (villages/hamlets)
-        if result['county'] and result['county'] in self.county_places:
+        # Only do this if we should use UK lookups
+        if use_uk_lookups and result['county'] and result['county'] in self.county_places:
             county_data = self.county_places[result['county']]
             
             # First pass: Look for local1 places (main places)
@@ -1500,7 +1748,8 @@ class ReportQueryHandler:
                         break
         
         # If no county found yet, check all counties for local1/local2 matches
-        if not result['county']:
+        # Only do this if we should use UK lookups
+        if use_uk_lookups and not result['county']:
             for county, county_data in self.county_places.items():
                 for local1_place, local1_data in county_data.items():
                     # Check for local1 match
@@ -1511,6 +1760,10 @@ class ReportQueryHandler:
                             local1_found = True
                             break
                     
+                    # Also check if place name appears in the original string (for space-separated multi-word places)
+                    if not local1_found and local1_place.lower() in place_lower:
+                        local1_found = True
+                    
                     if local1_found:
                         result['local1'] = local1_place
                         result['county'] = county
@@ -1518,6 +1771,13 @@ class ReportQueryHandler:
                         
                         # Also assign the nation for this county
                         if not result['nation']:
+                            for nation, counties in self.nation_counties.items():
+                                if county in counties:
+                                    result['nation'] = nation
+                                    break
+                        elif result['nation'] == 'UK':
+                            # Special case: if we had "UK" but found a specific county, 
+                            # override UK with the specific nation for that county
                             for nation, counties in self.nation_counties.items():
                                 if county in counties:
                                     result['nation'] = nation
@@ -1533,6 +1793,10 @@ class ReportQueryHandler:
                                         local2_found = True
                                         break
                                 
+                                # Also check if local2 place appears in the original string
+                                if not local2_found and local2_place.lower() in place_lower:
+                                    local2_found = True
+                                
                                 if local2_found:
                                     result['local2'] = local2_place
                                     result['recognized_parts'] = True
@@ -1543,7 +1807,8 @@ class ReportQueryHandler:
                     break
         
         # Check for direct nation-place mappings (places without intermediate counties)
-        if not result['local1']:  # Only check if we haven't found a local1 yet
+        # Only do this if we should use UK lookups AND we haven't found a local1 yet
+        if use_uk_lookups and not result['local1']:
             for nation, places in self.nation_places.items():
                 for place in places:
                     # Use exact word matching
@@ -1566,10 +1831,33 @@ class ReportQueryHandler:
                         elif not result['nation']:
                             # If we found a place but no nation yet, assign the correct nation
                             result['nation'] = nation
+                        elif result['nation'] == 'UK':
+                            # Special case: if we had "UK" but found a specific place, 
+                            # override UK with the specific nation for that place
+                            result['nation'] = nation
                         # Note: No county assigned for direct nation-place mappings
                         break
                 if result['local1']:
                     break
+        
+        # Check for non-UK nation places if we detected a non-UK nation but haven't found places yet
+        if not use_uk_lookups and result['nation'] and not result['local1']:
+            # Look up places in the detected nation's nation_places
+            if result['nation'] in self.nation_places:
+                nation_places_list = self.nation_places[result['nation']]
+                for place in nation_places_list:
+                    # Use exact matching against full place parts
+                    place_found = False
+                    for part in place_parts:
+                        if place.lower() == part.lower():
+                            place_found = True
+                            break
+                    
+                    if place_found:
+                        result['local1'] = place
+                        result['recognized_parts'] = True
+                        # Nation is already set, no county for non-UK places
+                        break
         
         return result
     

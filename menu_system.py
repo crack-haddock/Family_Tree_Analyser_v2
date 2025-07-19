@@ -44,6 +44,11 @@ class MenuSystem:
         self.ancestor_filter_ids: Optional[set] = None
         self.current_category: Optional[str] = None
         
+        # Store ancestor filtering state for switching between modes
+        self.root_ancestor = None
+        self.filtering_mode: Optional[str] = None  # 'direct' or 'relations'
+        self.tree_constraints = None  # Store birth year constraints
+        
         # Initialize query handlers
         self.search_handler = SearchQueryHandler(database)
         self.validity_handler = ValidityQueryHandler(database)
@@ -107,22 +112,16 @@ class MenuSystem:
         self._add_option("2", "Birth place analysis (detailed breakdown)", 
                         self.report_handler.analyze_birth_places_detailed, "r", ["read", "places"])
         
-        self._add_option("3", "To Do - Birth places: Ireland, Ulster, France, Holland, Germany", 
-                        self._placeholder_handler, "r", ["read", "places"])
-        
-        self._add_option("4", "To Do - Birth places: Scotland", 
-                        self._placeholder_handler, "r", ["read", "places"])
-        
-        self._add_option("5", "To Do - Occupation analysis and counts", 
+        self._add_option("3", "To Do - Occupation analysis and counts", 
                         self._placeholder_handler, "r", ["read", "occupations"])
         
-        self._add_option("6", "To Do - Oldest individuals (by birth year)", 
+        self._add_option("4", "To Do - Oldest individuals (by birth year)", 
                         self._placeholder_handler, "r", ["read", "dates"])
         
-        self._add_option("7", "To Do - Individuals with multiple birth places", 
+        self._add_option("5", "To Do - Individuals with multiple birth places", 
                         self._placeholder_handler, "r", ["read", "places"])
         
-        self._add_option("8", "To Do - Detailed birth information for individual", 
+        self._add_option("6", "To Do - Detailed birth information for individual", 
                         self._placeholder_handler, "r", ["read", "places", "dates"])
         
         # === DATA MANAGEMENT ===
@@ -319,31 +318,87 @@ class MenuSystem:
     
     def _handle_set_root_ancestor(self):
         """Handle the (Re)Set Root Ancestor functionality."""
-        print("\n--- (Re)Set Root Ancestor ---")
-        
-        # If already filtering, offer reset option
-        if self.ancestor_filter_ids:
-            print(f"Currently filtering to {len(self.ancestor_filter_ids)} ancestors.")
-            print("\nOptions:")
-            print("1. Reset to full database (clear ancestor filter)")
-            print("2. Set new root ancestor")
-            print("3. Cancel")
+        while True:
+            print("\n--- (Re)Set Root Ancestor ---")
             
-            choice = input("\nChoose option (1-3): ").strip()
-            
-            if choice == '1':
-                self.ancestor_filter_ids = None
-                self.update_validity_handler_context()
-                print("\n✅ Ancestor filter cleared. Now analyzing all individuals in database.")
-                input("\nPress Enter to continue...")
-                return
-            elif choice == '3':
-                return
-            elif choice != '2':
-                print("Invalid choice.")
-                input("\nPress Enter to continue...")
-                return
-            # If choice == '2', continue to set new ancestor
+            # If already filtering, offer enhanced options
+            if self.ancestor_filter_ids:
+                current_mode = "direct ancestors only" if self.filtering_mode == 'direct' else "ancestors and their relations"
+                alternate_mode = "ancestors and their relations" if self.filtering_mode == 'direct' else "direct ancestors only"
+                
+                print(f"Currently filtering to {len(self.ancestor_filter_ids)} {current_mode}.")
+                if self.root_ancestor:
+                    print(f"Root ancestor: {self.root_ancestor.name}")
+                
+                print("\nOptions:")
+                print("1. Reset to full database (clear ancestor filter)")
+                print(f"2. Switch to {alternate_mode}")
+                print("3. Set new root ancestor")
+                print("b. Back to main menu")
+                
+                choice = input("\nChoose option (1-3, or 'b' to go back): ").strip().lower()
+                
+                if choice == '1':
+                    # Clear all ancestor filter state
+                    self.ancestor_filter_ids = None
+                    self.root_ancestor = None
+                    self.filtering_mode = None
+                    self.tree_constraints = None
+                    self.update_validity_handler_context()
+                    print("\n✅ Ancestor filter cleared. Now analyzing all individuals in database.")
+                    input("\nPress Enter to continue...")
+                    continue  # Stay in menu
+                elif choice == '2':
+                    # Toggle filtering mode using stored root ancestor and constraints
+                    if self.root_ancestor and self.tree_constraints:
+                        new_mode = 'relations' if self.filtering_mode == 'direct' else 'direct'
+                        self._apply_filtering_mode(self.root_ancestor, self.tree_constraints, new_mode)
+                        continue  # Stay in menu
+                    else:
+                        print("⚠ Cannot switch mode: root ancestor or constraints not stored.")
+                        input("\nPress Enter to continue...")
+                        continue  # Stay in menu
+                elif choice == '3':
+                    # Set new root ancestor - continue to full selection process
+                    if self._set_new_root_ancestor():
+                        continue  # Stay in menu after successful set
+                    else:
+                        continue  # Stay in menu after cancelled/failed set
+                elif choice == 'b':
+                    return  # Back to main menu
+                else:
+                    print("Invalid choice.")
+                    input("\nPress Enter to continue...")
+                    continue  # Stay in menu
+            else:
+                # No current filter - show main filtering options
+                print("\nAncestor filtering options:")
+                print("1. Set new root ancestor filter")
+                print("2. View current filter status")
+                print("b. Back to main menu")
+                
+                choice = input("\nChoose option (1-2, or 'b' to go back): ").strip().lower()
+                
+                if choice == '1':
+                    # Set new root ancestor - continue to full selection process
+                    if self._set_new_root_ancestor():
+                        continue  # Stay in menu after successful set
+                    else:
+                        continue  # Stay in menu after cancelled/failed set
+                elif choice == '2':
+                    print(f"\nCurrent filter status: No ancestor filter applied")
+                    print("All individuals in the database are included in analysis.")
+                    input("\nPress Enter to continue...")
+                    continue  # Stay in menu
+                elif choice == 'b':
+                    return  # Back to main menu
+                else:
+                    print("Invalid choice.")
+                    input("\nPress Enter to continue...")
+                    continue  # Stay in menu
+    
+    def _set_new_root_ancestor(self) -> bool:
+        """Handle the process of setting a new root ancestor. Returns True if successful, False if cancelled."""
         
         # Step 1: Get root ancestor name
         print("\nSelect a root ancestor to filter analysis.")
@@ -351,7 +406,7 @@ class MenuSystem:
         if not name:
             print("No name entered.")
             input("\nPress Enter to continue...")
-            return
+            return False
         
         # Step 2: Get birth year range for finding the root ancestor
         print(f"\nEnter birth year range to find the root ancestor '{name}':")
@@ -396,7 +451,7 @@ class MenuSystem:
         else:
             print("Search not supported by this database.")
             input("\nPress Enter to continue...")
-            return
+            return False
         
         # Handle search results
         if not results:
@@ -411,7 +466,7 @@ class MenuSystem:
             
             print(f"\nNo individuals found matching '{name}'{constraint_msg}.")
             input("\nPress Enter to continue...")
-            return
+            return False
         
         # Step 3: Handle selection based on number of matches
         selected_ancestor = None
@@ -433,7 +488,7 @@ class MenuSystem:
             else:
                 print("Selection cancelled.")
                 input("\nPress Enter to continue...")
-                return
+                return False
         else:
             # Multiple matches - show list and ask for selection
             print(f"\nFound {len(results)} matching individuals:")
@@ -449,7 +504,7 @@ class MenuSystem:
             if not choice:
                 print("Selection cancelled.")
                 input("\nPress Enter to continue...")
-                return
+                return False
             
             try:
                 index = int(choice) - 1
@@ -458,11 +513,11 @@ class MenuSystem:
                 else:
                     print(f"Invalid selection. Please choose 1-{len(results)}.")
                     input("\nPress Enter to continue...")
-                    return
+                    return False
             except ValueError:
                 print("Invalid input. Please enter a number.")
                 input("\nPress Enter to continue...")
-                return
+                return False
         
         # Step 4: Get tree constraints (separate from root ancestor constraints)
         print(f"\nSelected root ancestor: {selected_ancestor.name}")
@@ -479,30 +534,52 @@ class MenuSystem:
         filter_choice = input("\nChoose filtering type (1-2): ").strip()
         
         if filter_choice == '1':
+            filtering_mode = 'direct'
+        elif filter_choice == '2':
+            filtering_mode = 'relations'
+        else:
+            print("Invalid choice.")
+            input("\nPress Enter to continue...")
+            return False
+        
+        # Store the ancestor information for future mode switching
+        self.root_ancestor = selected_ancestor
+        self.tree_constraints = (tree_min_year, tree_max_year)
+        
+        # Apply the selected filtering mode
+        self._apply_filtering_mode(selected_ancestor, (tree_min_year, tree_max_year), filtering_mode)
+        
+        return True  # Successfully set new root ancestor
+    
+    def _apply_filtering_mode(self, selected_ancestor, tree_constraints, filtering_mode):
+        """Apply the specified filtering mode using stored ancestor and constraints."""
+        tree_min_year, tree_max_year = tree_constraints
+        
+        if filtering_mode == 'direct':
             # Direct ancestors only
             ancestor_ids = self._get_direct_ancestors_with_constraints(selected_ancestor, tree_min_year, tree_max_year)
             filter_type = "Direct ancestors only"
-        elif filter_choice == '2':
+        elif filtering_mode == 'relations':
             # Direct ancestors and their relations
             ancestor_ids = self._get_ancestors_and_relations_with_constraints(selected_ancestor, tree_min_year, tree_max_year)
             filter_type = "Direct ancestors and their relations"
         else:
-            print("Invalid choice.")
-            input("\nPress Enter to continue...")
+            print(f"⚠ Unknown filtering mode: {filtering_mode}")
             return
+        
+        # Store the current filtering mode
+        self.filtering_mode = filtering_mode
         
         # Apply the filter
         self.ancestor_filter_ids = ancestor_ids
         self.update_validity_handler_context()
         
-        # Step 5: Display confirmation with final summary
+        # Display confirmation with final summary
         print(f"\n✅ Ancestor filter applied successfully!")
         print(f"Root ancestor: {selected_ancestor.name}")
         print(f"Filter type: {filter_type}")
         self._display_birth_year_summary(tree_min_year, tree_max_year)
         print(f"Total ancestors included in analysis: {len(ancestor_ids)}")
-        
-        input("\nPress Enter to continue...")
         
         input("\nPress Enter to continue...")
     
