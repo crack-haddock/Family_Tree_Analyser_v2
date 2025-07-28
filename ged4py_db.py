@@ -11,6 +11,8 @@ import json
 import pickle
 import os
 import time
+import shutil
+import traceback
 
 from gedcom_db import GedcomDB, Individual, Family
 
@@ -24,8 +26,9 @@ except ImportError:
 class Ged4PyIndividual(Individual):
     """Individual wrapper for ged4py records."""
     
-    def __init__(self, xref_id: str, raw_record):
+    def __init__(self, xref_id: str, raw_record, gedcom_db=None):
         super().__init__(xref_id, raw_record)
+        self.gedcom_db = gedcom_db
     
     @property
     def name(self) -> str:
@@ -164,140 +167,600 @@ class Ged4PyIndividual(Individual):
         return children
 
     def get_occupations(self) -> List[dict]:
-        """Extract occupation information from various GEDCOM tags and sources."""
+        """Extract occupation information recursively from all tags and notes."""
         occupations = []
         if not self.raw_record:
             return occupations
         
-        # Check direct occupation tags
-        for sub in self.raw_record.sub_records:
-            try:
-                # Standard occupation tags
-                if sub.tag in ['OCCU', 'PROF', 'TITL']:
-                    if sub.value:
-                        occ_info = {
-                            'occupation': str(sub.value).strip(),
-                            'source': sub.tag,
+        # Recursively extract from all parts of the record
+        self._extract_occupations_recursive(self.raw_record, occupations)
+        
+        return occupations
+    
+# Replace the method starting at line 179
+
+    def _extract_occupations_recursive(self, record, occupations: List[dict], depth: int = 0):
+        """
+        Recursively extract occupations from a record and all its sub-records, including source records.
+        Uses a robust, case-insensitive exclusion list for skipping irrelevant fields.
+        """
+        if depth > 20:  # Increased depth limit for deep source record nesting
+            return
+
+        indent = "  " * depth
+
+        # Unified, robust exclusion list (case-insensitive, substring match)
+        exclusion_list = [
+            "archive", "national archives", "relationship", "relation", "marital", "gsu", "folio",
+            "ancestry family tree", "general register office", "Marriage Index", "cemeter", "Burial", 
+            "death", "Deceased", "Workhouse Admission", "marriages", "cremations", "record office", "parish",
+            #"census", "census record",
+            "Parish Registers", "Archdeacon", "piece:", "reference", "index", "findagrave", "war grave"
+        ]
+        exclusion_list = [e.lower() for e in exclusion_list]
+
+        try:
+            # Check direct OCCU tags
+            if hasattr(record, 'tag') and record.tag in ['OCCU', 'PROF', '_OCCU'] and record.value:
+                occupation_text = str(record.value).strip()
+                if not self._looks_like_source_title(occupation_text):
+                    print(f"{indent}DEBUG: Found top-level occupation: '{occupation_text}'")
+                    occupations.append({
+                        'occupation': occupation_text,
+                        'source': record.tag,
+                        'date': None,
+                        'place': None
+                    })
+
+            # Check data-holding tags that might contain occupations
+            if hasattr(record, 'tag') and record.tag in ['NOTE', 'TEXT', 'DATA', 'PAGE', 'CONT'] and record.value:
+                text_data = str(record.value).strip()
+                if len(text_data) > 5 and any(char.isalpha() for char in text_data):
+                    text_data_lower = text_data.lower()
+                    #if any(excl in text_data_lower for excl in exclusion_list):
+                        #print(f"{indent}DEBUG: Skipping record with tag '{record.tag}' due to exclusion filter: '{text_data[:50]}...'")
+                    #    None
+                    #else:
+                        #print(f"\n--- INTERACTIVE DEBUG: Record Tag '{record.tag}' for Individual {self.name} (Depth: #{depth}) ---")
+                        #print(f"Text: {text_data}")
+                        #user_input = input("Does this look like it contains occupation data? (y/n): ").strip().lower()
+
+                        ##if user_input == 'y':
+                    extracted_occupations = self._extract_occupations_from_text_regex(text_data)
+                        #print(f"Extraction result: {extracted_occupations if extracted_occupations else 'None found'}")
+                    for occ in extracted_occupations:
+                        occupations.append({
+                            'occupation': occ,
+                            'source': f'{record.tag}_tag',
                             'date': None,
                             'place': None
-                        }
-                        
-                        # Check for date and place in sub-records
-                        if hasattr(sub, 'sub_records'):
-                            for sub2 in sub.sub_records:
-                                if sub2.tag == 'DATE' and sub2.value:
-                                    occ_info['date'] = str(sub2.value).strip()
-                                elif sub2.tag == 'PLAC' and sub2.value:
-                                    occ_info['place'] = str(sub2.value).strip()
-                        
-                        occupations.append(occ_info)
-                
-                # Custom occupation tags (like _OCCU)
-                elif sub.tag.startswith('_') and 'OCCU' in sub.tag.upper():
-                    if sub.value:
-                        occ_info = {
-                            'occupation': str(sub.value).strip(),
-                            'source': f"custom_{sub.tag}",
-                            'date': None,
-                            'place': None
-                        }
-                        occupations.append(occ_info)
-                
-                # Check NOTE fields for occupation information
-                elif sub.tag == 'NOTE':
-                    if sub.value:
-                        note_text = str(sub.value).strip().lower()
-                        # Look for occupation keywords in notes
-                        if any(keyword in note_text for keyword in 
-                               ['occupation:', 'profession:', 'trade:', 'job:', 'work:', 'employed', 'occupation']):
-                            occ_info = {
-                                'occupation': str(sub.value).strip(),
-                                'source': 'NOTE_field',
-                                'date': None,
-                                'place': None
-                            }
-                            occupations.append(occ_info)
-                
-                # Check within events for occupation data
-                elif sub.tag in ['CENS', 'RESI', 'EVEN', 'FACT']:
-                    event_date = None
-                    event_place = None
-                    event_occupations = []
+                        })
+                        ##else:
+                          ##  print("Skipping extraction for this record.")
+
+            # Handle SOUR (source) references - resolve and check the actual source record
+            if hasattr(record, 'tag') and record.tag == 'SOUR' and record.value:
+                source_ref = str(record.value).strip()
+                if source_ref.startswith('@') and source_ref.endswith('@'):
+                    try:
+                        if hasattr(self, 'gedcom_db') and self.gedcom_db and hasattr(self.gedcom_db, '_source_index'):
+                            source_record = self.gedcom_db._source_index.get(source_ref)
+                            if source_record:
+                                #print(f"{indent}DEBUG: Resolving SOUR tag '{source_ref}', entering recursive search.")
+                                # Recursively search the resolved source record
+                                self._extract_occupations_recursive(source_record, occupations, depth + 1)
+                            else:
+                                print(f"{indent}DEBUG: FAILED to resolve source record {source_ref} from index.")
+                        else:
+                            print(f"CRITICAL: Cannot resolve source {source_ref} for {self.xref_id}. DB link missing or source index not built.")
+                    except Exception as e:
+                        print(f"Warning: Error resolving source {source_ref}: {e}")
+
+            # Recursively process all sub-records
+            if hasattr(record, 'sub_records') and record.sub_records:
+                for sub_record in record.sub_records:
+                    self._extract_occupations_recursive(sub_record, occupations, depth + 1)
+
+        except Exception:
+            # Continue processing other records if one fails
+            pass
+    
+    def _extract_occupations_from_text_regex(self, text: str) -> List[str]:
+        """Extract occupations from text using regex patterns like version 1."""
+        if not text:
+            return []
+        
+        occupations = []
+        text_lower = text.lower()
+        
+        import re
+        
+        # Pattern 1: "Occupation: [job title]"
+        occupation_patterns = [
+            r'occupation:\s*([^;,\n\r]+)',
+            r'profession:\s*([^;,\n\r]+)', 
+            r'trade:\s*([^;,\n\r]+)',
+            r'employment:\s*([^;,\n\r]+)',
+            r'job:\s*([^;,\n\r]+)',
+            r'work:\s*([^;,\n\r]+)',
+            r'employed\s+as:\s*([^;,\n\r]+)',
+            r'working\s+as:\s*([^;,\n\r]+)',
+        ]
+        
+        for pattern in occupation_patterns:
+            matches = re.finditer(pattern, text_lower)
+            for match in matches:
+                occupation = match.group(1).strip()
+                if occupation and len(occupation) > 2:  # Avoid single letters
+                    # Clean up the occupation
+                    occupation = re.sub(r'\s+', ' ', occupation)  # Normalize whitespace
+                    occupation = occupation.strip('.,;:-')  # Remove trailing punctuation
+                    if occupation:
+                        occupations.append(occupation.title())
+        
+        # Pattern 2: Common occupation words standing alone
+        # Look for standalone occupation keywords that might not have explicit labels
+        # Always check this, not just when no explicit patterns found
+        occupation_keywords = [
+            r'\b(farmer|farming)\b',
+            r'\b(labou?rer?|labou?ring)\b', 
+            r'\b(miner|mining|pitman|collier)\b',
+            r'\b(clerk|clerical)\b',
+            r'\b(teacher|teaching|schoolmaster|schoolmistress)\b',
+            r'\b(carpenter|joiner|woodworker)\b',
+            r'\b(blacksmith|smith|metalworker)\b',
+            r'\b(merchant|trader|dealer)\b',
+            r'\b(miller|milling)\b',
+            r'\b(baker|baking)\b',
+            r'\b(shoemaker|cobbler|bootmaker)\b',
+            r'\b(tailor|tailoring|seamstress|dressmaker)\b',
+            r'\b(weaver|weaving|textile)\b',
+            r'\b(mason|stonemason|bricklayer)\b',
+            r'\b(cooper|barrel\s*maker)\b',
+            r'\b(butcher|meat\s*seller)\b',
+            r'\b(grocer|shopkeeper|storekeeper)\b',
+            r'\b(servant|domestic|housemaid|cook)\b',
+            r'\b(nurse|nursing)\b',
+            r'\b(doctor|physician|surgeon)\b',
+            r'\b(lawyer|solicitor|barrister)\b',
+            r'\b(minister|priest|clergyman|vicar|rector)\b',
+            r'\b(soldier|military|army)\b',
+            r'\b(sailor|seaman|mariner|navy)\b',
+            r'\b(engineer|engineering)\b',
+            r'\b(machinist|machine\s*operator)\b',
+            r'\b(foreman|supervisor|overseer)\b',
+            r'\b(manager|management)\b',
+            r'\b(proprietor|owner)\b',
+            r'\b(salesman|sales|commercial\s*traveller)\b',
+            r'\b(driver|carter|coachman)\b',
+            r'\b(conductor|railway|railroad)\b',
+            r'\b(fireman|stoker)\b',
+            r'\b(policeman|constable|police)\b',
+            r'\b(postman|postal|mail)\b',
+            r'\b(guard|watchman|gatekeeper)\b',
+            r'\b(attendant|caretaker)\b',
+        ]
+        
+        # Check keyword patterns regardless of whether we found explicit patterns
+        for pattern in occupation_keywords:
+            matches = re.finditer(pattern, text_lower)
+            for match in matches:
+                occupation = match.group(1).strip()
+                if occupation:
+                    # Convert to a more standard form
+                    if 'labou' in occupation:
+                        occupation = 'Labourer'
+                    elif 'farm' in occupation:
+                        occupation = 'Farmer'
+                    elif 'min' in occupation or 'pit' in occupation or 'collier' in occupation:
+                        occupation = 'Miner'
+                    else:
+                        occupation = occupation.title()
                     
-                    # Look for occupation within the event
-                    if hasattr(sub, 'sub_records'):
-                        for sub2 in sub.sub_records:
-                            if sub2.tag == 'DATE' and sub2.value:
-                                event_date = str(sub2.value).strip()
-                            elif sub2.tag == 'PLAC' and sub2.value:
-                                event_place = str(sub2.value).strip()
-                            elif sub2.tag in ['OCCU', 'PROF'] and sub2.value:
-                                event_occupations.append(str(sub2.value).strip())
-                            elif sub2.tag == 'NOTE' and sub2.value:
-                                note_text = str(sub2.value).strip()
-                                # Parse occupation from note text like "Occupation: Coal Miner Hewer; Marital Status: Married; ..."
-                                if 'occupation:' in note_text.lower():
-                                    # Extract just the occupation part
-                                    parts = note_text.split(';')
-                                    for part in parts:
-                                        part = part.strip()
-                                        if part.lower().startswith('occupation:'):
-                                            occupation = part[11:].strip()  # Remove "Occupation:" prefix
-                                            if occupation:
-                                                event_occupations.append(occupation)
-                                            break
-                                elif any(keyword in note_text.lower() for keyword in 
-                                       ['profession:', 'trade:', 'job:', 'work:', 'employed']):
-                                    event_occupations.append(note_text)
-                    
-                    # Also check if the main event value contains occupation info
-                    if sub.value:
-                        event_text = str(sub.value).strip()
-                        # Look for occupation-like keywords in residence or census data
-                        if any(keyword in event_text.lower() for keyword in 
-                               ['occupation:', 'profession:', 'trade:', 'job:', 'work:', 'employed as']):
-                            event_occupations.append(event_text)
-                    
-                    # Add any found occupations from this event
-                    for occ_text in event_occupations:
-                        occ_info = {
-                            'occupation': occ_text,
-                            'source': f"{sub.tag}_event",
-                            'date': event_date,
-                            'place': event_place
-                        }
-                        occupations.append(occ_info)
-                
-                # Check SOURCE records for embedded occupation data
-                elif sub.tag == 'SOUR':
-                    # We would need to follow the source reference to get the actual source record
-                    # For now, check if there are any sub-records under the source reference
-                    if hasattr(sub, 'sub_records'):
-                        for sub2 in sub.sub_records:
-                            if sub2.tag in ['TEXT', 'NOTE', 'DATA'] and sub2.value:
-                                text_value = str(sub2.value).strip().lower()
-                                if any(keyword in text_value for keyword in 
-                                       ['occupation:', 'profession:', 'trade:', 'job:', 'work:', 'employed']):
-                                    occ_info = {
-                                        'occupation': str(sub2.value).strip(),
-                                        'source': f"source_{sub2.tag}",
-                                        'date': None,
-                                        'place': None
-                                    }
-                                    occupations.append(occ_info)
-                        
-            except Exception as e:
-                # Continue processing other records if one fails
-                continue
+                    if occupation not in occupations:  # Avoid duplicates
+                        occupations.append(occupation)
         
         return occupations
 
+    def _get_source_record(self, source_id: str):
+        """Get a source record by its ID."""
+        try:
+            # Use the database's source index if available
+            if hasattr(self, 'gedcom_db') and self.gedcom_db and hasattr(self.gedcom_db, 'records'):
+                return self.gedcom_db.records.get(source_id)
+        except Exception:
+            pass
+        return None
+    
+    def _extract_occupations_from_source_record(self, source_record):
+        """Extract occupation data from a source record."""
+        occupations = []
+        try:
+            if hasattr(source_record, 'sub_records'):
+                for sub in source_record.sub_records:
+                    if sub.tag in ['TEXT', 'NOTE', 'DATA'] and sub.value:
+                        occupation_text = self._extract_occupation_from_text(str(sub.value))
+                        if occupation_text:
+                            occupations.append({
+                                'occupation': occupation_text,
+                                'date': None,
+                                'place': None,
+                                'source': f"source_record_{sub.tag}",
+                            })
+                    # Check sub-sub records for occupation data
+                    elif hasattr(sub, 'sub_records'):
+                        for sub2 in sub.sub_records:
+                            if sub2.tag in ['TEXT', 'NOTE'] and sub2.value:
+                                occupation_text = self._extract_occupation_from_text(str(sub2.value))
+                                if occupation_text:
+                                    occupations.append({
+                                        'occupation': occupation_text,
+                                        'date': None,
+                                        'place': None,
+                                        'source': f"source_record_{sub.tag}_{sub2.tag}",
+                                    })
+        except Exception:
+            pass
+        return occupations
+
+    def _looks_like_source_title(self, text: str) -> bool:
+        """Check if text looks like a source title rather than an occupation."""
+        if not text:
+            return False
+        
+        text_lower = text.lower()
+        
+        # Common source title indicators
+        source_indicators = [
+            'census', 'england', 'wales', 'scotland', 'birth', 'death', 'marriage',
+            'baptism', 'burial', 'church', 'parish', 'register', 'record', 'index',
+            'ancestry', 'family tree', 'freebmd', 'lds', 'mormon', 'familysearch',
+            'class:', 'piece:', 'folio:', 'page:', 'rg9', 'rg10', 'rg11', 'rg12',
+            'ho107', 'probate', 'administration', 'will', 'christening'
+        ]
+        
+        return any(indicator in text_lower for indicator in source_indicators)
+    
+    def _is_census_source(self, source_record) -> bool:
+        """Check if a source record represents a census."""
+        try:
+            if hasattr(source_record, 'sub_records'):
+                for sub in source_record.sub_records:
+                    if sub.tag == 'TITL' and sub.value:
+                        title = str(sub.value).lower()
+                        if 'census' in title:
+                            return True
+        except Exception:
+            pass
+        return False
+    
+    def _extract_census_occupations(self, source_record, occupations: List[dict]):
+        """Extract occupation data specifically from census source records."""
+        try:
+            if hasattr(source_record, 'sub_records'):
+                for sub in source_record.sub_records:
+                    # Focus on TEXT, NOTE, and DATA fields in census records
+                    if sub.tag in ['TEXT', 'NOTE', 'DATA'] and sub.value:
+                        text_data = str(sub.value).strip()
+                        # Use enhanced regex extraction for census data
+                        extracted_occupations = self._extract_occupations_from_census_text(text_data)
+                        
+                        for occ in extracted_occupations:
+                            occupations.append({
+                                'occupation': occ,
+                                'source': f'CENSUS_{sub.tag}',
+                                'date': None,
+                                'place': None
+                            })
+                    
+                    # Check sub-sub records for nested occupation data
+                    elif hasattr(sub, 'sub_records'):
+                        for sub2 in sub.sub_records:
+                            if sub2.tag in ['TEXT', 'NOTE', 'DATA'] and sub2.value:
+                                text_data = str(sub2.value).strip()
+                                extracted_occupations = self._extract_occupations_from_census_text(text_data)
+                                
+                                for occ in extracted_occupations:
+                                    occupations.append({
+                                        'occupation': occ,
+                                        'source': f'CENSUS_{sub.tag}_{sub2.tag}',
+                                        'date': None,
+                                        'place': None
+                                    })
+        except Exception:
+            pass
+    
+    def _extract_occupations_from_census_text(self, text: str) -> List[str]:
+        """Enhanced occupation extraction specifically designed for census text data."""
+        if not text:
+            return []
+        
+        occupations = []
+        text_lower = text.lower()
+        
+        import re
+        
+        # Enhanced patterns for census data
+        census_occupation_patterns = [
+            r'occupation[:\s]*([^;,\n\r\t]+)',
+            r'profession[:\s]*([^;,\n\r\t]+)',
+            r'trade[:\s]*([^;,\n\r\t]+)',
+            r'employment[:\s]*([^;,\n\r\t]+)',
+            r'work[:\s]*([^;,\n\r\t]+)',
+            r'job[:\s]*([^;,\n\r\t]+)',
+            r'employed\s+as[:\s]*([^;,\n\r\t]+)',
+            r'working\s+as[:\s]*([^;,\n\r\t]+)',
+        ]
+        
+        for pattern in census_occupation_patterns:
+            matches = re.finditer(pattern, text_lower)
+            for match in matches:
+                occupation = match.group(1).strip()
+                if occupation and len(occupation) > 1:
+                    # Clean up the occupation
+                    occupation = re.sub(r'\s+', ' ', occupation)  # Normalize whitespace
+                    occupation = occupation.strip('.,;:-')  # Remove trailing punctuation
+                    
+                    # Validate it looks like an occupation, not a place or other data
+                    if self._validate_occupation_text(occupation):
+                        occupations.append(occupation.title())
+        
+        # If no explicit patterns found, look for standalone occupation keywords
+        if not occupations:
+            occupation_keywords = [
+                r'\b(farmer|farming|agricultural\s*lab[ou]*rer)\b',
+                r'\b(lab[ou]*rer?|lab[ou]*ring|general\s*lab[ou]*rer)\b',
+                r'\b(miner|mining|pitman|collier|coal\s*miner)\b',
+                r'\b(clerk|clerical|office\s*clerk)\b',
+                r'\b(teacher|teaching|schoolmaster|schoolmistress|head\s*teacher)\b',
+                r'\b(carpenter|joiner|woodworker|cabinet\s*maker)\b',
+                r'\b(blacksmith|smith|metalworker|iron\s*worker)\b',
+                r'\b(merchant|trader|dealer|shop\s*keeper)\b',
+                r'\b(miller|milling|flour\s*miller)\b',
+                r'\b(baker|baking|bread\s*maker)\b',
+                r'\b(shoemaker|cobbler|bootmaker|cordwainer)\b',
+                r'\b(tailor|tailoring|seamstress|dressmaker|needle\s*woman)\b',
+                r'\b(weaver|weaving|textile\s*worker|cloth\s*worker)\b',
+                r'\b(mason|stonemason|bricklayer|stone\s*cutter)\b',
+                r'\b(cooper|barrel\s*maker|cask\s*maker)\b',
+                r'\b(butcher|meat\s*seller|slaughterer)\b',
+                r'\b(grocer|provision\s*dealer|general\s*dealer)\b',
+                r'\b(servant|domestic|housemaid|cook|kitchen\s*maid)\b',
+                r'\b(nurse|nursing|hospital\s*nurse)\b',
+                r'\b(doctor|physician|surgeon|medical\s*practitioner)\b',
+                r'\b(lawyer|solicitor|barrister|legal\s*practitioner)\b',
+                r'\b(minister|priest|clergyman|vicar|rector|chaplain)\b',
+                r'\b(soldier|military|army|private|corporal|sergeant)\b',
+                r'\b(sailor|seaman|mariner|navy|able\s*seaman)\b',
+                r'\b(engineer|engineering|mechanical\s*engineer)\b',
+                r'\b(machinist|machine\s*operator|factory\s*worker)\b',
+                r'\b(foreman|supervisor|overseer|manager)\b',
+                r'\b(proprietor|owner|master|employer)\b',
+                r'\b(salesman|sales|commercial\s*traveller|agent)\b',
+                r'\b(driver|carter|coachman|cab\s*driver)\b',
+                r'\b(conductor|railway|railroad|train\s*driver)\b',
+                r'\b(fireman|stoker|engine\s*driver)\b',
+                r'\b(policeman|constable|police|detective)\b',
+                r'\b(postman|postal|mail\s*carrier|letter\s*carrier)\b',
+                r'\b(guard|watchman|gatekeeper|caretaker)\b',
+            ]
+            
+            for pattern in occupation_keywords:
+                matches = re.finditer(pattern, text_lower)
+                for match in matches:
+                    occupation = match.group(1).strip()
+                    if occupation:
+                        # Convert to standard form
+                        occupation = self._standardize_occupation(occupation)
+                        if occupation and occupation not in occupations:
+                            occupations.append(occupation)
+        
+        return occupations
+    
+    def _validate_occupation_text(self, text: str) -> bool:
+        """Validate that text looks like a legitimate occupation."""
+        if not text or len(text) < 2:
+            return False
+        
+        text_lower = text.lower().strip()
+        
+        # Reject obvious non-occupations
+        non_occupation_indicators = [
+            'unknown', 'none', 'n/a', 'blank', 'illegible', 'unclear',
+            'head', 'wife', 'son', 'daughter', 'child', 'infant',
+            'married', 'single', 'widow', 'widower',
+            'england', 'wales', 'scotland', 'ireland', 'london',
+            'born', 'died', 'age', 'year', 'month', 'day',
+            'class:', 'piece:', 'folio:', 'page:', 'district:',
+            'enumeration', 'registration', 'sub-district',
+        ]
+        
+        for indicator in non_occupation_indicators:
+            if indicator in text_lower:
+                return False
+        
+        # Must contain at least one letter
+        if not re.search(r'[a-zA-Z]', text):
+            return False
+        
+        # Reasonable length limits
+        if len(text) > 50:  # Too long to be a simple occupation
+            return False
+        
+        return True
+    
+    def _standardize_occupation(self, occupation: str) -> str:
+        """Convert occupation variations to standard forms."""
+        occupation = occupation.lower().strip()
+        
+        # Standardization mappings
+        if 'labou' in occupation or 'labor' in occupation:
+            if 'farm' in occupation or 'agric' in occupation:
+                return 'Agricultural Labourer'
+            else:
+                return 'Labourer'
+        elif 'farm' in occupation:
+            return 'Farmer'
+        elif 'min' in occupation or 'pit' in occupation or 'collier' in occupation or 'coal' in occupation:
+            return 'Miner'
+        elif 'teach' in occupation or 'school' in occupation:
+            return 'Teacher'
+        elif 'serv' in occupation and 'domestic' in occupation:
+            return 'Domestic Servant'
+        elif 'cloth' in occupation or 'text' in occupation or 'weav' in occupation:
+            return 'Textile Worker'
+        else:
+            return occupation.title()
+
+    def _extract_occupation_from_text(self, text: str):
+        """Extract occupation from text using various patterns."""
+        if not text:
+            return None
+        
+        text = text.strip()
+        text_lower = text.lower()
+        
+        # Direct occupation patterns
+        occupation_patterns = [
+            r'occupation:\s*([^;,\n]+)',
+            r'profession:\s*([^;,\n]+)',
+            r'trade:\s*([^;,\n]+)',
+            r'job:\s*([^;,\n]+)',
+            r'work:\s*([^;,\n]+)',
+            r'employed\s+as:\s*([^;,\n]+)',
+            r'worked\s+as:\s*([^;,\n]+)',
+        ]
+        
+        import re
+        for pattern in occupation_patterns:
+            match = re.search(pattern, text_lower)
+            if match:
+                occupation = match.group(1).strip()
+                # Clean up common suffixes
+                occupation = re.sub(r'\s*[;,].*$', '', occupation)
+                return occupation.title()
+        
+        # Check if the entire text looks like an occupation
+        # (no colons or semicolons, reasonable length)
+        if len(text) < 50 and ':' not in text and ';' not in text:
+            # Common occupation keywords
+            occupation_keywords = [
+                'farmer', 'laborer', 'labourer', 'miner', 'clerk', 'teacher', 'carpenter',
+                'blacksmith', 'merchant', 'miller', 'baker', 'shoemaker', 'tailor',
+                'weaver', 'mason', 'cooper', 'butcher', 'grocer', 'servant', 'cook',
+                'nurse', 'doctor', 'lawyer', 'minister', 'priest', 'soldier', 'sailor',
+                'engineer', 'machinist', 'foreman', 'superintendent', 'manager', 'owner',
+                'proprietor', 'dealer', 'agent', 'salesman', 'driver', 'conductor',
+                'fireman', 'policeman', 'postman', 'guard', 'keeper', 'attendant'
+            ]
+            
+            if any(keyword in text_lower for keyword in occupation_keywords):
+                return text.title()
+        
+        return None
+
+    def debug_occupations_interactive(self, exclusion_list=None):
+        """
+        Interactive occupation extraction for this individual.
+        Shows every candidate field (not excluded) in full, asks user if it contains occupation data.
+        After all fields for this person, asks if user wants to continue to next person.
+        """
+        if exclusion_list is None:
+            exclusion_list = [
+                "archive", "national archives", "relationship", "relation", "marital", "gsu", "folio",
+                "ancestry family tree", "general register office", "census record"
+            ]
+        exclusion_list = [e.lower() for e in exclusion_list]
+
+        # Gather all candidate text blobs (from self and all linked sources)
+        blobs = self._get_all_linked_text(self.raw_record, visited_refs=set())
+
+        found_occupations = []
+        for idx, text in enumerate(blobs, 1):
+            text_lower = text.lower()
+            if any(excl in text_lower for excl in exclusion_list):
+                continue  # skip excluded fields
+
+            print(f"\n--- DEBUG: {self.name} [{self.xref_id}] - Field {idx} ---")
+            print(f"Text:\n{text}\n")
+            user_input = input("Does this field contain occupation data? (y/n/stop): ").strip().lower()
+            if user_input == "stop":
+                print("Stopping debug session.")
+                return found_occupations
+            if user_input == "y":
+                found_occupations.append(text)
+
+        print(f"\nFinished reviewing all fields for {self.name} [{self.xref_id}].")
+        return found_occupations
+
+    def _get_all_linked_text(self, record, visited_refs: set, depth: int = 0) -> list:
+        """
+        Recursively collect every NOTE/TEXT/DATA/PAGE/CONT/OCCU/PROF tag value
+        from record and any SOUR-linked records.
+        """
+        if depth > 20 or record is None:
+            return []
+        blobs = []
+        xref = getattr(record, 'xref_id', None)
+        if xref and xref in visited_refs:
+            return []
+        if xref:
+            visited_refs.add(xref)
+
+        # 1) collect text on this record
+        if getattr(record, 'tag', None) in ['NOTE','TEXT','DATA','PAGE','CONT','OCCU','PROF'] and record.value:
+            blobs.append(str(record.value).strip())
+
+        # 2) recurse sub_records (excluding SOUR pointers)
+        for sub in getattr(record, 'sub_records', []) or []:
+            if getattr(sub, 'tag', None) != 'SOUR':
+                blobs.extend(self._get_all_linked_text(sub, visited_refs, depth+1))
+
+        # 3) resolve SOUR pointer at this level
+        if getattr(record, 'tag', None) == 'SOUR' and record.value:
+            sid = str(record.value).strip()
+            if sid.startswith('@') and sid.endswith('@'):
+                src = getattr(self.gedcom_db, '_source_index', {}).get(sid)
+                if src:
+                    blobs.extend(self._get_all_linked_text(src, visited_refs, depth+1))
+
+        return blobs
 
 class Ged4PyFamily(Family):
     """Family wrapper for ged4py records."""
     
     def __init__(self, xref_id: str, raw_record):
         super().__init__(xref_id, raw_record)
+    
+    def get_husband(self) -> Optional['Individual']:
+        """Get the husband/father in this family."""
+        if not self.raw_record:
+            return None
+        
+        husband_ref = self.raw_record.husband
+        if husband_ref:
+            return Ged4PyIndividual(husband_ref.xref_id, husband_ref)
+        return None
+    
+    def get_wife(self) -> Optional['Individual']:
+        """Get the wife/mother in this family.""" 
+        if not self.raw_record:
+            return None
+            
+        wife_ref = self.raw_record.wife
+        if wife_ref:
+            return Ged4PyIndividual(wife_ref.xref_id, wife_ref)
+        return None
+    
+    def get_children(self) -> List['Individual']:
+        """Get all children in this family."""
+        if not self.raw_record:
+            return []
+            
+        children = []
+        for child_ref in self.raw_record.children:
+            children.append(Ged4PyIndividual(child_ref.xref_id, child_ref))
+        return children
 
 
 class Ged4PyGedcomDB(GedcomDB):
@@ -307,7 +770,7 @@ class Ged4PyGedcomDB(GedcomDB):
         super().__init__()
         self.capabilities = {
             'read', 'search', 'analyze', 'dates', 'places', 'occupations',
-            'relationships', 'data_quality'
+            'relationships', 'data_quality', "marriage"
         }
         self._parser = None
         self._individuals_cache = None
@@ -316,6 +779,7 @@ class Ged4PyGedcomDB(GedcomDB):
         # Relationship indexes for fast lookups
         self._individual_index = {}  # xref_id -> Individual
         self._family_index = {}      # xref_id -> Family
+        self._source_index = {}      # xref_id -> Source record
         self._parent_index = {}      # individual_id -> set of parent_ids
         self._child_index = {}       # individual_id -> set of child_ids
         self._spouse_index = {}      # individual_id -> set of spouse_ids
@@ -328,6 +792,11 @@ class Ged4PyGedcomDB(GedcomDB):
         self._indexes_dir = self._cache_dir / 'indexes'
         self._metadata_file = self._cache_dir / 'metadata.json'
         self._cache_version = "1.0"
+    
+    @property
+    def records(self):
+        """Access to source records for occupation extraction."""
+        return self._source_index
     
     def load_file(self, file_path: str) -> bool:
         """Load GEDCOM file using ged4py with intelligent caching."""
@@ -383,6 +852,7 @@ class Ged4PyGedcomDB(GedcomDB):
         # Clear existing indexes
         self._individual_index.clear()
         self._family_index.clear()
+        self._source_index.clear()
         self._parent_index.clear()
         self._child_index.clear()
         self._spouse_index.clear()
@@ -390,9 +860,10 @@ class Ged4PyGedcomDB(GedcomDB):
         
         full_path = self._base_dir / self.file_path
         with GedcomReader(str(full_path)) as parser:
-            # First pass: Index all individuals and families (streaming, not loading all into memory)
+            # First pass: Index all individuals, families, and sources (streaming, not loading all into memory)
             for indi in parser.records0('INDI'):
-                individual = Ged4PyIndividual(indi.xref_id, indi)
+                # Pass a reference to this database instance (self) to the individual
+                individual = Ged4PyIndividual(indi.xref_id, indi, self)
                 self._individual_index[indi.xref_id] = individual
                 self._parent_index[indi.xref_id] = set()
                 self._child_index[indi.xref_id] = set()
@@ -402,6 +873,10 @@ class Ged4PyGedcomDB(GedcomDB):
                 family = Ged4PyFamily(fam.xref_id, fam)
                 self._family_index[fam.xref_id] = family
                 self._family_members[fam.xref_id] = {'parents': set(), 'children': set()}
+            
+            # Index source records for occupation extraction
+            for sour in parser.records0('SOUR'):
+                self._source_index[sour.xref_id] = sour
             
             # Second pass: Build relationship mappings
             for indi in parser.records0('INDI'):
@@ -503,7 +978,7 @@ class Ged4PyGedcomDB(GedcomDB):
         full_path = self._base_dir / self.file_path
         with GedcomReader(str(full_path)) as parser:
             for indi in parser.records0('INDI'):
-                individuals.append(Ged4PyIndividual(indi.xref_id, indi))
+                individuals.append(Ged4PyIndividual(indi.xref_id, indi, self))
         return individuals
     
     def get_all_families(self) -> List[Family]:
@@ -531,7 +1006,7 @@ class Ged4PyGedcomDB(GedcomDB):
         with GedcomReader(self.file_path) as parser:
             for indi in parser.records0('INDI'):
                 if indi.xref_id == xref_id:
-                    return Ged4PyIndividual(indi.xref_id, indi)
+                    return Ged4PyIndividual(indi.xref_id, indi, self)
         return None
     
     def find_family_by_id(self, xref_id: str) -> Optional[Family]:
@@ -555,7 +1030,7 @@ class Ged4PyGedcomDB(GedcomDB):
         
         with GedcomReader(self.file_path) as parser:
             for indi in parser.records0('INDI'):
-                indi_wrapper = Ged4PyIndividual(indi.xref_id, indi)
+                indi_wrapper = Ged4PyIndividual(indi.xref_id, indi, self)
                 indi_name = indi_wrapper.name.lower()
                 
                 # Check name match
@@ -649,7 +1124,7 @@ class Ged4PyGedcomDB(GedcomDB):
                     if ancestor_filter_ids and indi.xref_id not in ancestor_filter_ids:
                         continue
                     
-                    indi_wrapper = Ged4PyIndividual(indi.xref_id, indi)
+                    indi_wrapper = Ged4PyIndividual(indi.xref_id, indi, self)
                     indi_name = indi_wrapper.name.lower()
                     
                     # Check name match
@@ -779,16 +1254,21 @@ class Ged4PyGedcomDB(GedcomDB):
             with open(self._indexes_dir / 'family_members.pkl', 'rb') as f:
                 self._family_members = pickle.load(f)
             
-            # Rebuild individual and family indexes from GEDCOM file
+            # Rebuild individual, family, and source indexes from GEDCOM file
             full_path = self._base_dir / self.file_path
             with GedcomReader(str(full_path)) as parser:
                 for indi in parser.records0('INDI'):
-                    individual = Ged4PyIndividual(indi.xref_id, indi)
+                    # Pass a reference to this database instance (self) to the individual
+                    individual = Ged4PyIndividual(indi.xref_id, indi, self)
                     self._individual_index[indi.xref_id] = individual
                 
                 for fam in parser.records0('FAM'):
                     family = Ged4PyFamily(fam.xref_id, fam)
                     self._family_index[fam.xref_id] = family
+                
+                # Index source records for occupation extraction
+                for sour in parser.records0('SOUR'):
+                    self._source_index[sour.xref_id] = sour
             
             self._indexes_built = True
             return True
@@ -875,3 +1355,431 @@ class Ged4PyGedcomDB(GedcomDB):
                 pass
         
         return info
+
+    def scan_census_sources_for_occupations(self, occupations_config_path="occupations_config.json"):
+        """
+        Scan all census source records for fields matching occupation keywords/patterns.
+        Prints record type, field name, full text, and matching occupation(s).
+        """
+
+        # Load occupation keywords/patterns
+        with open(occupations_config_path, "r", encoding="utf-8") as f:
+            config = json.load(f)
+        keywords = set()
+        for group in config.get("occupation_groups", {}).values():
+            keywords.update([k.lower() for k in group])
+        for pat in config.get("occupation_patterns", {}).values():
+            keywords.add(pat.lower())
+
+        #print(f"Loaded occupation keywords: {keywords}")
+
+        #print(f"DEBUG: ancestor_filter_ids = {getattr(self, 'ancestor_filter_ids', None)}")
+
+        # Determine which individuals to process
+        if hasattr(self, "ancestor_filter_ids") and self.ancestor_filter_ids:
+            individuals = [self._individual_index[xref_id] for xref_id in self.ancestor_filter_ids if xref_id in self._individual_index]
+        else:
+            individuals = list(self._individual_index.values())
+
+        count = 0
+        for ind in individuals:
+            name = getattr(ind, "name", None) or ind.xref_id
+            # Only process John Samuel Moss
+            if name != "John Samuel Moss":
+                continue
+            birth_year = getattr(ind, "birth_year", None)
+            death_year = getattr(ind, "death_year", None)
+            print(f"\nPerson: {name}, Birth Year: {birth_year}, Death Year: {death_year}")
+
+            # Recursively print all census records and any linked records
+            def print_all_fields(record, indent="    ", visited=None):
+                if visited is None:
+                    visited = set()
+                xref = getattr(record, "xref_id", None)
+                if xref and xref in visited:
+                    return
+                if xref:
+                    visited.add(xref)
+                for field in getattr(record, "sub_records", []):
+                    tag = getattr(field, "tag", None)
+                    value = getattr(field, "value", None)
+                    print(f"{indent}{tag}: {value}")
+                    # If this is a SOUR pointer, recursively print the linked source record
+                    if tag == "SOUR" and value:
+                        source_id = str(value).strip()
+                        source_record = self._source_index.get(source_id)
+                        if source_record:
+                            print(f"{indent}-- Recursing into linked source record {source_id} --")
+                            print_all_fields(source_record, indent + "    ", visited)
+                    # Recursively print sub-sub-records
+                    if hasattr(field, "sub_records") and field.sub_records:
+                        print_all_fields(field, indent + "    ", visited)
+
+            # Find all census sources attached to this individual and print everything recursively
+            for sub in getattr(ind.raw_record, "sub_records", []):
+                if getattr(sub, "tag", None) == "SOUR" and sub.value:
+                    source_id = str(sub.value).strip()
+                    source_record = self._source_index.get(source_id)
+                    if source_record:
+                        # Check if source is a census
+                        for src_sub in getattr(source_record, "sub_records", []):
+                            if getattr(src_sub, "tag", None) in ("TITL", "TITLE") and src_sub.value:
+                                title = str(src_sub.value).lower()
+                                if "census" in title:
+                                    print(f"\n  Census record for source {source_id}:")
+                                    print_all_fields(source_record, indent="    ")
+            
+            count += 1
+
+            #cont = input("Continue to next person? (y/n): ").strip().lower()
+            #if cont not in ("y", "yes", ""):
+            #    print("Exiting census scan.")
+            #    break
+
+        print(f"\nTotal individuals processed: {count}")
+    
+    def dump_wedding_records(self):
+        """
+        Dump all data under wedding (marriage) records for each family and for individuals.
+        Merge individual marriage records with family ones if the individual's marriage date matches the family's marriage date.
+        """
+        print("\n=== Dumping all wedding (marriage) records for all families and individuals ===\n")
+        family_marriages = []
+        individual_marriages = []
+
+        # 1. Collect family marriage records
+        for fam in self._family_index.values():
+            fam_id = fam.xref_id
+            husband_name = "Unknown"
+            wife_name = "Unknown"
+            husband_id = None
+            wife_id = None
+            for sub in getattr(fam.raw_record, "sub_records", []):
+                if getattr(sub, "tag", None) == "HUSB" and sub.value:
+                    husband_id = str(sub.value)
+                    husb = self._individual_index.get(husband_id)
+                    if husb:
+                        husband_name = husb.name
+                if getattr(sub, "tag", None) == "WIFE" and sub.value:
+                    wife_id = str(sub.value)
+                    wife = self._individual_index.get(wife_id)
+                    if wife:
+                        wife_name = wife.name
+            for sub in getattr(fam.raw_record, "sub_records", []):
+                if getattr(sub, "tag", None) in ("MARR", "MARRIAGE", "WEDDING"):
+                    # Try to get marriage date
+                    marriage_date = None
+                    for sub2 in getattr(sub, "sub_records", []):
+                        if getattr(sub2, "tag", None) == "DATE" and sub2.value:
+                            marriage_date = str(sub2.value).strip()
+                            break
+                    family_marriages.append({
+                        "fam_id": fam_id,
+                        "husband_name": husband_name,
+                        "wife_name": wife_name,
+                        "husband_id": husband_id,
+                        "wife_id": wife_id,
+                        "record": sub,
+                        "marriage_date": marriage_date
+                    })
+
+        # 2. Collect individual marriage records
+        for ind in self._individual_index.values():
+            name = getattr(ind, "name", None) or ind.xref_id
+            for sub in getattr(ind.raw_record, "sub_records", []):
+                if getattr(sub, "tag", None) in ("MARR", "MARRIAGE", "WEDDING"):
+                    # Try to get marriage date
+                    marriage_date = None
+                    for sub2 in getattr(sub, "sub_records", []):
+                        if getattr(sub2, "tag", None) == "DATE" and sub2.value:
+                            marriage_date = str(sub2.value).strip()
+                            break
+                    individual_marriages.append({
+                        "name": name,
+                        "xref_id": ind.xref_id,
+                        "record": sub,
+                        "marriage_date": marriage_date
+                    })
+
+        # 3. Print family marriage records and merge with matching individual records by marriage date
+        matched_individuals = set()
+        print("=== Family Marriage Records ===")
+        family_count = 0
+        for fam in family_marriages:
+            print(f"\nFamily: {fam['fam_id']}")
+            print(f"  Husband: {fam['husband_name']}")
+            print(f"  Wife: {fam['wife_name']}")
+            print(f"  {fam['record'].tag}: {getattr(fam['record'], 'value', None)}")
+            print(f"  Marriage Date: {fam['marriage_date']}")
+            # Print all subfields recursively
+            def print_subfields(rec, indent="    "):
+                for field in getattr(rec, "sub_records", []):
+                    tag = getattr(field, "tag", None)
+                    value = getattr(field, "value", None)
+                    print(f"{indent}{tag}: {value}")
+                    if hasattr(field, "sub_records") and field.sub_records:
+                        print_subfields(field, indent + "    ")
+            print_subfields(fam['record'])
+
+            # Print all info from the wedding source document(s)
+            for sub in getattr(fam['record'], "sub_records", []):
+                if getattr(sub, "tag", None) == "SOUR" and sub.value:
+                    source_id = str(sub.value).strip()
+                    source_record = self._source_index.get(source_id)
+                    if source_record:
+                        print(f"    --- Wedding Source Document ({source_id}) ---")
+                        def print_source_fields(record, indent="      "):
+                            for field in getattr(record, "sub_records", []):
+                                tag = getattr(field, "tag", None)
+                                value = getattr(field, "value", None)
+                                print(f"{indent}{tag}: {value}")
+                                if hasattr(field, "sub_records") and field.sub_records:
+                                    print_source_fields(field, indent + "    ")
+                        print_source_fields(source_record)
+
+            # Check for matching individual marriage records by marriage date
+            for ind_mar in individual_marriages:
+                if ind_mar["marriage_date"] and fam["marriage_date"] and ind_mar["marriage_date"] == fam["marriage_date"]:
+                    print(f"  [MATCHED INDIVIDUAL RECORD: {ind_mar['name']} ({ind_mar['xref_id']})]")
+                    print(f"    {ind_mar['record'].tag}: {getattr(ind_mar['record'], 'value', None)}")
+                    print(f"    Marriage Date: {ind_mar['marriage_date']}")
+                    print_subfields(ind_mar['record'], indent="      ")
+                    matched_individuals.add(ind_mar["xref_id"])
+            family_count += 1
+
+        # 4. Print unmatched individual marriage records
+        print("\n=== Individual Marriage Records (not matched to any family) ===")
+        individual_count = 0
+        for ind_mar in individual_marriages:
+            if ind_mar["xref_id"] not in matched_individuals:
+                print(f"\nIndividual: {ind_mar['name']} [{ind_mar['xref_id']}]")
+                print(f"  {ind_mar['record'].tag}: {getattr(ind_mar['record'], 'value', None)}")
+                print(f"  Marriage Date: {ind_mar['marriage_date']}")
+                def print_subfields(rec, indent="    "):
+                    for field in getattr(rec, "sub_records", []):
+                        tag = getattr(field, "tag", None)
+                        value = getattr(field, "value", None)
+                        print(f"{indent}{tag}: {value}")
+                        if hasattr(field, "sub_records") and field.sub_records:
+                            print_subfields(field, indent + "    ")
+                print_subfields(ind_mar['record'])
+                individual_count += 1
+
+        print(f"\nTotal family marriage records: {family_count}")
+        print(f"Total individual marriage records (not matched): {individual_count}")
+
+    def analyse_wedding_ages(self):
+        """
+        Analyse average ages at marriage for men and women.
+        Prints overall, decade, and century stats with min/max/avg for bride and groom.
+        Excludes ages >= 120 from stats, but keeps them in the 'over 40s' summary (ordered by age descending).
+        Also prints a grand total summary with avg/min/max for both bride and groom.
+        Brides under 16 and grooms under 16 are summarised at the end as likely invalid data.
+        """
+        print("\n=== Wedding Age Analysis ===\n")
+        # Use ancestor filter if present
+        if hasattr(self, "ancestor_filter_ids") and self.ancestor_filter_ids:
+            individuals = [self._individual_index[xref_id] for xref_id in self.ancestor_filter_ids if xref_id in self._individual_index]
+        else:
+            individuals = list(self._individual_index.values())
+
+        # Build lookup for birth years and names
+        birth_years = {ind.xref_id: ind.birth_year for ind in individuals if ind.birth_year}
+        names = {ind.xref_id: ind.name for ind in individuals}
+
+        # Collect ages by decade and century
+        decade_data = {}
+        century_data = {}
+        groom_ages = []
+        bride_ages = []
+        groom_over_40 = []
+        bride_over_40 = []
+        groom_under_16 = []
+        bride_under_16 = []
+
+        for fam in self._family_index.values():
+            husband_id = wife_id = None
+            husband_birth = wife_birth = marriage_year = None
+
+            # Get husband and wife IDs
+            for sub in getattr(fam.raw_record, "sub_records", []):
+                if getattr(sub, "tag", None) == "HUSB" and sub.value:
+                    husband_id = str(sub.value)
+                if getattr(sub, "tag", None) == "WIFE" and sub.value:
+                    wife_id = str(sub.value)
+            # Get marriage year
+            for sub in getattr(fam.raw_record, "sub_records", []):
+                if getattr(sub, "tag", None) in ("MARR", "MARRIAGE", "WEDDING"):
+                    for sub2 in getattr(sub, "sub_records", []):
+                        if getattr(sub2, "tag", None) == "DATE" and sub2.value:
+                            try:
+                                marriage_year = int(str(sub2.value).strip()[-4:])
+                            except Exception:
+                                marriage_year = None
+                            break
+
+            if not marriage_year:
+                continue
+
+            decade = (marriage_year // 10) * 10
+            century = (marriage_year // 100) * 100
+
+            # Groom
+            husband_birth = birth_years.get(husband_id)
+            if husband_birth and marriage_year >= husband_birth:
+                age = marriage_year - husband_birth
+                if age > 40:
+                    groom_over_40.append({
+                        "name": names.get(husband_id, husband_id),
+                        "age": age,
+                        "marriage_year": marriage_year,
+                        "fam_id": fam.xref_id
+                    })
+                if age < 16:
+                    groom_under_16.append({
+                        "name": names.get(husband_id, husband_id),
+                        "age": age,
+                        "marriage_year": marriage_year,
+                        "fam_id": fam.xref_id
+                    })
+                if 16 <= age < 120:
+                    groom_ages.append(age)
+                    decade_data.setdefault(decade, {"bride": [], "groom": []})["groom"].append(age)
+                    century_data.setdefault(century, {"bride": [], "groom": []})["groom"].append(age)
+            # Bride
+            wife_birth = birth_years.get(wife_id)
+            if wife_birth and marriage_year >= wife_birth:
+                age = marriage_year - wife_birth
+                if age > 40:
+                    bride_over_40.append({
+                        "name": names.get(wife_id, wife_id),
+                        "age": age,
+                        "marriage_year": marriage_year,
+                        "fam_id": fam.xref_id
+                    })
+                if age < 16:
+                    bride_under_16.append({
+                        "name": names.get(wife_id, wife_id),
+                        "age": age,
+                        "marriage_year": marriage_year,
+                        "fam_id": fam.xref_id
+                    })
+                if 16 <= age < 120:
+                    bride_ages.append(age)
+                    decade_data.setdefault(decade, {"bride": [], "groom": []})["bride"].append(age)
+                    century_data.setdefault(century, {"bride": [], "groom": []})["bride"].append(age)
+
+        def avg(lst):
+            return round(sum(lst) / len(lst), 2) if lst else None
+        def minmax(lst):
+            return (min(lst), max(lst)) if lst else (None, None)
+
+        # Overall
+        print(f"Overall average groom age at marriage: {avg(groom_ages)} ({len(groom_ages)} records)")
+        print(f"Overall average bride age at marriage: {avg(bride_ages)} ({len(bride_ages)} records)\n")
+
+        # Grand total stats across all data
+        bride_min, bride_max = minmax(bride_ages)
+        groom_min, groom_max = minmax(groom_ages)
+        print("=== Grand Total Marriage Age Stats ===")
+        print(f"  Bride Avg: {avg(bride_ages)} (min: {bride_min}, max: {bride_max})")
+        print(f"  Groom Avg: {avg(groom_ages)} (min: {groom_min}, max: {groom_max})\n")
+
+        # Per-decade
+        print("=== Per-Decade Marriage Age Stats ===")
+        grand_total = 0
+        for decade in sorted(decade_data):
+            bride_list = decade_data[decade]["bride"]
+            groom_list = decade_data[decade]["groom"]
+            all_ages = bride_list + groom_list
+            n_records = max(len(bride_list), len(groom_list))
+            grand_total += n_records
+            bride_avg, groom_avg = avg(bride_list), avg(groom_list)
+            bride_min, bride_max = minmax(bride_list)
+            groom_min, groom_max = minmax(groom_list)
+            overall_avg = avg(all_ages)
+            print(f"{decade}s: {overall_avg} ({n_records} records)")
+            print(f"    Bride Avg: {bride_avg} (min: {bride_min}, max: {bride_max})")
+            print(f"    Groom Avg: {groom_avg} (min: {groom_min}, max: {groom_max})")
+        print(f"\nGrand total marriages: {grand_total}")
+
+        # Per-century
+        print("\n=== Per-Century Marriage Age Stats ===")
+        for century in sorted(century_data):
+            bride_list = century_data[century]["bride"]
+            groom_list = century_data[century]["groom"]
+            all_ages = bride_list + groom_list
+            n_records = max(len(bride_list), len(groom_list))
+            bride_avg, groom_avg = avg(bride_list), avg(groom_list)
+            bride_min, bride_max = minmax(bride_list)
+            groom_min, groom_max = minmax(groom_list)
+            overall_avg = avg(all_ages)
+            century_label = f"{century//100+1}th century" if century >= 1000 else f"{century}s"
+            print(f"{century_label}: {overall_avg} ({n_records} records)")
+            print(f"    Bride Avg: {bride_avg} (min: {bride_min}, max: {bride_max})")
+            print(f"    Groom Avg: {groom_avg} (min: {groom_min}, max: {groom_max})")
+
+        # Flag individuals over 40 (ordered by age descending)
+        if groom_over_40:
+            print("\nGrooms over 40 at marriage:")
+            for g in sorted(groom_over_40, key=lambda x: -x['age']):
+                print(f"  {g['name']} (Family {g['fam_id']}): Age {g['age']} in {g['marriage_year']}")
+        if bride_over_40:
+            print("\nBrides over 40 at marriage:")
+            for b in sorted(bride_over_40, key=lambda x: -x['age']):
+                print(f"  {b['name']} (Family {b['fam_id']}): Age {b['age']} in {b['marriage_year']}")
+
+        # Flag individuals under 16 (ordered by age ascending)
+        if groom_under_16:
+            print("\nGrooms under 16 at marriage (possible invalid data):")
+            for g in sorted(groom_under_16, key=lambda x: x['age']):
+                print(f"  {g['name']} (Family {g['fam_id']}): Age {g['age']} in {g['marriage_year']}")
+        if bride_under_16:
+            print("\nBrides under 16 at marriage (possible invalid data):")
+            for b in sorted(bride_under_16, key=lambda x: x['age']):
+                print(f"  {b['name']} (Family {b['fam_id']}): Age {b['age']} in {b['marriage_year']}")
+
+        # If average is above 40, show all records
+        if (avg(groom_ages) and avg(groom_ages) > 40) or (avg(bride_ages) and avg(bride_ages) > 40):
+            print("\n*** WARNING: Average age above 40 detected. Listing all marriage ages: ***")
+            print("\nAll groom ages:")
+            for fam in self._family_index.values():
+                husband_id = wife_id = None
+                husband_birth = marriage_year = None
+                for sub in getattr(fam.raw_record, "sub_records", []):
+                    if getattr(sub, "tag", None) == "HUSB" and sub.value:
+                        husband_id = str(sub.value)
+                for sub in getattr(fam.raw_record, "sub_records", []):
+                    if getattr(sub, "tag", None) in ("MARR", "MARRIAGE", "WEDDING"):
+                        for sub2 in getattr(sub, "sub_records", []):
+                            if getattr(sub2, "tag", None) == "DATE" and sub2.value:
+                                try:
+                                    marriage_year = int(str(sub2.value).strip()[-4:])
+                                except Exception:
+                                    marriage_year = None
+                                break
+                husband_birth = birth_years.get(husband_id)
+                if husband_birth and marriage_year and marriage_year >= husband_birth:
+                    age = marriage_year - husband_birth
+                    print(f"  {names.get(husband_id, husband_id)}: Age {age} in {marriage_year} (Family {fam.xref_id})")
+            print("\nAll bride ages:")
+            for fam in self._family_index.values():
+                wife_id = None
+                wife_birth = marriage_year = None
+                for sub in getattr(fam.raw_record, "sub_records", []):
+                    if getattr(sub, "tag", None) == "WIFE" and sub.value:
+                        wife_id = str(sub.value)
+                for sub in getattr(fam.raw_record, "sub_records", []):
+                    if getattr(sub, "tag", None) in ("MARR", "MARRIAGE", "WEDDING"):
+                        for sub2 in getattr(sub, "sub_records", []):
+                            if getattr(sub2, "tag", None) == "DATE" and sub2.value:
+                                try:
+                                    marriage_year = int(str(sub2.value).strip()[-4:])
+                                except Exception:
+                                    marriage_year = None
+                                break
+                wife_birth = birth_years.get(wife_id)
+                if wife_birth and marriage_year and marriage_year >= wife_birth:
+                    age = marriage_year - wife_birth
+                    print(f"  {names.get(wife_id, wife_id)}: Age {age} in {marriage_year} (Family {fam.xref_id})")
+

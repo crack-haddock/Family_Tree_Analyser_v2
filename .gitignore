@@ -1,1 +1,9 @@
 *.ged 
+
+# Cache directory for relationship indexes
+.cache/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo

@@ -39,7 +39,7 @@ def create_database(library_name: str) -> Optional[GedcomDB]:
 def get_gedcom_file() -> Optional[str]:
     """Get GEDCOM file path from user."""
     # Check for default file
-    default_files = ['moss_tree.ged', 'tree.ged']
+    default_files = ['moss_tree.ged']
     
     for default_file in default_files:
         if Path(default_file).exists():

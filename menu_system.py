@@ -4,7 +4,8 @@ Dynamically builds menu options based on available database capabilities.
 """
 
 from typing import Dict, List, Tuple, Optional, Callable
-from gedcom_db import GedcomDB
+from gedcom_db import GedcomDB, Individual
+from ged4py_db import Ged4PyGedcomDB
 from query_handlers import SearchQueryHandler, ValidityQueryHandler, ReportQueryHandler, DataQueryHandler
 
 
@@ -63,6 +64,9 @@ class MenuSystem:
         self.validity_handler.set_ancestor_filter(self.ancestor_filter_ids)
         self.search_handler.set_ancestor_filter(self.ancestor_filter_ids)
         self.report_handler.set_ancestor_filter(self.ancestor_filter_ids)
+
+        if hasattr(self, "database"):
+            self.database.ancestor_filter_ids = self.ancestor_filter_ids
     
     def _setup_categories(self):
         """Initialize menu categories."""
@@ -94,6 +98,13 @@ class MenuSystem:
         
         self._add_option("4", "To Do - Show individuals with duplicate names/dates", 
                         self._placeholder_handler, "v", ["read"])
+
+        self._add_option("5", "Show individuals with no gender specified",
+                        self.validity_handler.find_individuals_with_no_gender, "v", ["read"])
+
+        self._add_option("6", "Show individuals not in current tree",
+                        self.validity_handler.find_individuals_not_in_ancestry_tree, "v", ["read"])
+
         
         # === SEARCH & NAVIGATION ===
         self._add_option("1", "Find individual by name", 
@@ -121,8 +132,18 @@ class MenuSystem:
         self._add_option("5", "To Do - Individuals with multiple birth places", 
                         self._placeholder_handler, "r", ["read", "places"])
         
-        self._add_option("6", "To Do - Detailed birth information for individual", 
+        self._add_option("6", "To Doooooo - Detailed birth information for individual", 
                         self._placeholder_handler, "r", ["read", "places", "dates"])
+        
+        self._add_option("7", "Scan all census sources for occupation-like data",
+                        self.database.scan_census_sources_for_occupations, "r", ["read", "occupations"])
+
+        self._add_option("8", "Dump all data from wedding (marriage) records", 
+                         self.database.dump_wedding_records, "r", ["read", "marriage"])
+
+        self._add_option("9", "Analyse ages from wedding records", 
+                         self.database.analyse_wedding_ages, "r", ["read", "marriage"])
+        
         
         # === DATA MANAGEMENT ===
         self._add_option("1", "To Do - Export analysis results to file", 
@@ -133,6 +154,7 @@ class MenuSystem:
         
         self._add_option("3", "To Do - Import additional data", 
                         self._placeholder_handler, "d", ["read", "write"])
+
     
     def _add_option(self, key: str, description: str, handler: Callable, 
                    category: str, required_capabilities: List[str]):
@@ -309,7 +331,7 @@ class MenuSystem:
             if self.current_category is None:
                 choice = input(f"\nChoose a category or 'a' for ancestor filtering (or 'q' to quit): ").strip()
             else:
-                choice = input(f"\nChoose an option (1-8, 'b' for back, 'q' to quit): ").strip()
+                choice = input(f"\nChoose an option (1-9, 'b' for back, 'q' to quit): ").strip()
             
             if not self.handle_choice(choice):
                 break

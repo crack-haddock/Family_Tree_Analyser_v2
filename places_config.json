@@ -1,0 +1,243 @@
+{
+  "_comment": "Design principle: ALL nations can have both counties/states/provinces AND direct nation places. UK nations follow same rules as any other nation. See PLACES_CONFIG_README.md for details.",
+  "nation_counties": {
+    "England": [
+      "Cheshire",
+      "Shropshire/Salop",
+      "Lancashire",
+      "Yorkshire",
+      "Warwickshire",
+      "Kent",
+      "Devon/Dorset",
+      "Staffordshire",
+      "Cambridgeshire",
+      "Surrey",
+      "Norfolk",
+      "Lincolnshire",
+      "Northamptonshire",
+      "Berkshire"
+    ],
+    "Wales": [
+      "Flintshire",
+      "Denbighshire",
+      "Caernarvonshire"
+    ],
+    "Scotland": [],
+    "UK":["Scotland", "Wales", "England", "Northern Ireland"],
+    "Ireland": [],
+    "Jamaica": [],
+    "USA": [],
+    "France": [],
+    "Australia": []
+  },
+  "county_places": {
+    "Cambridgeshire": {
+        "Chatteris": {
+          "local2_places": [],
+          "known_streets": []
+        },
+        "Haddenham": {
+          "local2_places": [],
+          "known_streets": []
+        }
+    },
+    "Cheshire": {
+      "Chester": {
+        "local2_places": [],
+        "known_streets": []
+      },
+      "Tattenhall": {
+        "local2_places": [],
+        "known_streets": []
+      },
+      "Bunbury": {
+        "local2_places": [],
+        "known_streets": []
+      },
+      "Burwardsley": {
+        "local2_places": [],
+        "known_streets": []
+      }
+    },
+    "Flintshire": {
+      "Buckley": {
+        "local2_places": [],
+        "known_streets": []
+      },
+      "Hawarden": {
+        "local2_places": [],
+        "known_streets": []
+      },
+      "Holywell": {
+        "local2_places": [],
+        "known_streets": []
+      },
+      "Mold": {
+        "local2_places": [
+          "Llanfferes"
+        ],
+        "known_streets": []
+      },
+      "Northop": {
+        "local2_places": [],
+        "known_streets": []
+      },
+      "Northop Hall": {
+        "local2_places": [],
+        "known_streets": []
+      },
+      "Broughton": {
+        "local2_places": [],
+        "known_streets": []
+      },
+      "Rhes-y-Cae": {
+        "local2_places": [],
+        "known_streets": []
+      },
+      "Pentre Halkyn": {
+        "local2_places": [],
+        "known_streets": []
+      },
+      "St Asaph": {
+        "local2_places": ["Gwernglefryd"],
+        "known_streets": []
+      },
+      "Cilcain": {
+        "local2_places": [],
+        "known_streets": []
+      }
+    },
+    "Denbighshire": {
+      "Henllan": {
+        "local2_places": [],
+        "known_streets": []
+      },
+      "Ruthin": {
+        "local2_places": [],
+        "known_streets": []
+      },
+      "Llangwm": {
+        "local2_places": ["Llys Dimel Uchaf"],
+        "known_streets": []
+      },
+      "Cyffylliog": {
+        "local2_places": [],
+        "known_streets": []
+      },
+      "Llanarmon": {
+        "local2_places": [],
+        "known_streets": []
+      },
+      "Llanfferes": {
+        "local2_places": [],
+        "known_streets": []
+      }
+    },
+    "Caernarvonshire": {
+      "Bangor": {
+        "local2_places": [],
+        "known_streets": []
+      }
+    },
+    "Shropshire/Salop": {
+      "Market Drayton": {
+        "local2_places": [
+          "Monkhopton"
+        ],
+        "known_streets": []
+      },
+      "Shrewsbury": {
+        "local2_places": [],
+        "known_streets": []
+      },
+      "Drayton": {
+        "local2_places": [],
+        "known_streets": []
+      },
+      "Church Stretton": {
+        "local2_places": [],
+        "known_streets": []
+      },
+      "Broseley": {
+        "local2_places": [],
+        "known_streets": []
+      },
+      "Cheswardine": {
+        "local2_places": [],
+        "known_streets": []
+      }
+    },
+    "Devon/Dorset": {
+      "Dalwood": {
+        "local2_places": ["Culderwell"],
+        "known_streets": []
+      },
+      "Stockland": {
+        "local2_places": [],
+        "known_streets": []
+      },
+      "Musbury": {
+        "local2_places": [],
+        "known_streets": []
+      },
+      "Axminster": {
+        "local2_places": [],
+        "known_streets": []
+      },
+      "Axmouth": {
+        "local2_places": [],
+        "known_streets": []
+      },
+      "Colyton": {
+        "local2_places": [],
+        "known_streets": []
+      },
+      "Culderwell": {
+        "local2_places": [],
+        "known_streets": []
+      },
+      "Kilmington": {
+        "local2_places": [],
+        "known_streets": []
+      }
+    },
+    "Warwickshire": {
+        "Birmingham": {
+            "local2_places": [],
+            "known_streets": []
+        }
+    },
+    "Staffordshire": {
+        "Wolverhampton": {
+            "local2_places": [],
+            "known_streets": []
+        },
+        "Tyrly": {
+            "local2_places": [],
+            "known_streets": []
+        }
+    },
+    "Lancashire": {
+        "Blackburn": {
+            "local2_places": [],
+            "known_streets": []
+        },
+        "Manchester": {
+            "local2_places": [],
+            "known_streets": []
+        },
+        "Liverpool": {
+            "local2_places": [],
+            "known_streets": []
+        }
+    }
+  },
+  "nation_places": {
+    "Scotland": [
+      "Glasgow",
+      "Edinburgh"
+    ],
+    "England":["London"],
+    "Jamaica":["Manchester", "St Elizabeth"]
+  }
+}

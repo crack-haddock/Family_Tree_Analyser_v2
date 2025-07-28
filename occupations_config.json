@@ -1,0 +1,218 @@
+{
+  "occupation_groups": {
+    "House Keeper": [
+      "housewife",
+      "housekeeper",
+      "house keeper",
+      "unpaid duties",
+      "domestic duties",
+      "homemaker",
+      "home duties",
+      "keeping house",
+      "domestic",
+      "domestics"
+    ],
+    "Coal Worker": [
+      "coal miner",
+      "coalminer",
+      "coal mine worker",
+      "coal hewer",
+      "coal getter",
+      "collier",
+      "coal face worker",
+      "pit worker",
+      "mine worker",
+      "coal trimmer",
+      "coal screener"
+    ],
+    "Farm Worker": [
+      "agricultural labourer",
+      "farm labourer",
+      "farm worker",
+      "farm hand",
+      "agricultural worker",
+      "farm servant",
+      "ploughman",
+      "carter",
+      "shepherd",
+      "cowman",
+      "horseman",
+      "dairy maid",
+      "dairy worker"
+    ],
+    "Railway Worker": [
+      "railway worker",
+      "railway labourer",
+      "engine driver",
+      "locomotive driver",
+      "train driver",
+      "railway clerk",
+      "railway porter",
+      "railway guard",
+      "signalman",
+      "station master",
+      "pointsman"
+    ],
+    "Mill Worker": [
+      "mill worker",
+      "mill hand",
+      "cotton mill worker",
+      "textile worker",
+      "weaver",
+      "spinner",
+      "mill operative",
+      "factory worker",
+      "factory hand",
+      "factory operative"
+    ],
+    "Servant": [
+      "servant",
+      "domestic servant",
+      "house servant",
+      "general servant",
+      "parlour maid",
+      "parlor maid",
+      "kitchen maid",
+      "scullery maid",
+      "lady's maid",
+      "valet",
+      "butler",
+      "footman",
+      "coachman",
+      "groom"
+    ],
+    "Clerk": [
+      "clerk",
+      "office clerk",
+      "commercial clerk",
+      "shipping clerk",
+      "accounts clerk",
+      "book keeper",
+      "bookkeeper",
+      "counting house clerk",
+      "correspondence clerk",
+      "filing clerk"
+    ],
+    "Shopkeeper": [
+      "shopkeeper",
+      "shop keeper",
+      "storekeeper",
+      "store keeper",
+      "merchant",
+      "trader",
+      "retailer",
+      "dealer",
+      "vendor",
+      "seller"
+    ],
+    "Labourer": [
+      "labourer",
+      "general labourer",
+      "casual labourer",
+      "dock labourer",
+      "building labourer",
+      "road worker",
+      "navvy"
+    ],
+    "Seamstress": [
+      "seamstress",
+      "dressmaker",
+      "tailoress",
+      "needlewoman",
+      "sewing woman",
+      "milliner",
+      "embroiderer",
+      "shirt maker",
+      "corset maker"
+    ],
+    "Teacher": [
+      "teacher",
+      "school teacher",
+      "schoolteacher",
+      "school master",
+      "schoolmaster",
+      "school mistress",
+      "schoolmistress",
+      "governess",
+      "tutor",
+      "professor",
+      "instructor",
+      "educator"
+    ],
+    "Baker": [
+      "baker",
+      "bread baker",
+      "pastry cook",
+      "confectioner",
+      "biscuit maker",
+      "cake maker"
+    ],
+    "Blacksmith": [
+      "blacksmith",
+      "smith",
+      "farrier",
+      "horseshoer",
+      "ironworker",
+      "metal worker"
+    ],
+    "Carpenter": [
+      "carpenter",
+      "joiner",
+      "cabinet maker",
+      "woodworker",
+      "furniture maker",
+      "wood worker"
+    ],
+    "Mason": [
+      "mason",
+      "stone mason",
+      "bricklayer",
+      "plasterer",
+      "stone cutter",
+      "stone worker"
+    ],
+    "Gas Worker": [
+      "gas worker",
+      "gas fitter",
+      "gas man",
+      "gas stoker",
+      "gas meter reader",
+      "gasworks labourer",
+      "gasworks worker"
+    ],
+    "Pensioner": [
+      "pensioner",
+      "retired",
+      "pension",
+      "old age pension",
+      "army pensioner",
+      "military pensioner",
+      "naval pensioner",
+      "superannuated"
+    ],
+    "Soldier": [
+      "soldier",
+      "corporal",
+      "sergeant",
+      "lieutenant",
+      "captain",
+      "major",
+      "colonel",
+      "army",
+      "military",
+      "guardsman",
+      "rifleman"
+    ],
+    "Education": [
+      "scholar",
+      "school"
+    ]
+  },
+  "occupation_patterns": {
+    "apprentice_pattern": "apprentice",
+    "assistant_pattern": "assistant",
+    "journeyman_pattern": "journeyman",
+    "master_pattern": "master",
+    "foreman_pattern": "foreman"
+  }
+}

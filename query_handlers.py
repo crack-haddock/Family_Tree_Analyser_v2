@@ -4,10 +4,12 @@ Contains implementations for various analysis and search queries.
 """
 
 import json
+import re
 import time
 from pathlib import Path
 from typing import List, Optional
-from gedcom_db import GedcomDB, Individual
+from gedcom_db import GedcomDB, Individual  
+from ged4py_db import Ged4PyGedcomDB
 
 
 class SearchQueryHandler:
@@ -699,6 +701,60 @@ class ValidityQueryHandler:
         
         input("\nPress Enter to continue...")
 
+    def find_individuals_with_no_gender(self):
+        """
+        Print individuals with no gender specified.
+        Checks the raw GEDCOM record for a SEX tag.
+        """
+        print("\n--- Validity Check: Individuals with No Gender Specified ---")
+        all_individuals = self.database.get_all_individuals()
+        no_gender = []
+
+        for ind in all_individuals:
+            found_sex = None
+            if hasattr(ind, 'raw_record') and ind.raw_record and hasattr(ind.raw_record, 'sub_records'):
+                for sub in ind.raw_record.sub_records:
+                    if getattr(sub, 'tag', None) == 'SEX':
+                        found_sex = (sub.value or '').strip().upper()
+                        break
+            # Treat blank, U, UNK, UNKNOWN, or missing as "no gender"
+            if not found_sex or found_sex in ["", "U", "UNK", "UNKNOWN"]:
+                no_gender.append(ind)
+
+        if not no_gender:
+            print("\n✅ All individuals have gender specified.")
+        else:
+            print(f"\n❌ Found {len(no_gender)} individual(s) with no gender specified:\n")
+            for ind in no_gender:
+                print(f"• {ind.name} [{ind.xref_id}]")
+            print(f"\nTotal individuals with no gender specified: {len(no_gender)}")
+        input("\nPress Enter to continue...")
+
+    def find_individuals_not_in_ancestry_tree(self):
+        """
+        Print individuals who are NOT in the current ancestry tree (i.e., not in ancestor_filter_ids).
+        Shows a list and a total at the bottom, including year born/died in brackets by the name.
+        """
+        print("\n--- Validity Check: Individuals NOT in Current Ancestry Tree ---")
+        if not self.ancestor_filter_ids:
+            print("No ancestor filter is currently set. All individuals are considered part of the tree.")
+            input("\nPress Enter to continue...")
+            return
+
+        all_individuals = self.database.get_all_individuals()
+        not_in_tree = [ind for ind in all_individuals if ind.xref_id not in self.ancestor_filter_ids]
+
+        if not not_in_tree:
+            print("\n✅ All individuals are in the current ancestry tree.")
+        else:
+            print(f"\n❌ Found {len(not_in_tree)} individual(s) NOT in the current ancestry tree:\n")
+            for ind in not_in_tree:
+                birth = ind.birth_year if getattr(ind, "birth_year", None) else "?"
+                death = ind.death_year if getattr(ind, "death_year", None) else "?"
+                print(f"• {ind.name} [{birth}-{death}] [{ind.xref_id}]")
+            print(f"\nTotal individuals NOT in current ancestry tree: {len(not_in_tree)}")
+        input("\nPress Enter to continue...")
+
 class ReportQueryHandler:
     """Handles analysis and reporting queries."""
     
@@ -708,6 +764,9 @@ class ReportQueryHandler:
         
         # Load place configuration from JSON file
         self._load_places_config()
+        
+        # Load occupation configuration from JSON file
+        self._load_occupations_config()
     
     def _load_places_config(self):
         """Load place mappings from JSON configuration file."""
@@ -740,7 +799,100 @@ class ReportQueryHandler:
             print("Using default empty mappings.")
             self._use_default_mappings()
     
+    def _load_occupations_config(self):
+        """Load occupation groupings from JSON configuration file."""
+        config_file = Path(__file__).parent / 'occupations_config.json'
+        
+        try:
+            with open(config_file, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+                
+            self.occupation_groups = config.get('occupation_groups', {})
+            self.occupation_patterns = config.get('occupation_patterns', {})
+            
+            print(f"✓ Loaded {len(self.occupation_groups)} occupation groups from {config_file}")
+            
+        except FileNotFoundError:
+            print(f"⚠ Occupation config file not found: {config_file}")
+            print("  Creating default occupation mappings...")
+            self._use_default_occupation_mappings()
+        except json.JSONDecodeError as e:
+            print(f"⚠ Error parsing occupation config file: {e}")
+            print("  Using default occupation mappings...")
+            self._use_default_occupation_mappings()
+        except Exception as e:
+            print(f"⚠ Error loading occupation config: {e}")
+            print("  Using default occupation mappings...")
+            self._use_default_occupation_mappings()
+    
+    def _use_default_occupation_mappings(self):
+        """Fallback to basic default occupation mappings if config file fails to load."""
+        self.occupation_groups = {
+            'House Keeper': ['housewife', 'housekeeper', 'unpaid duties', 'domestic duties'],
+            'Coal Worker': ['coal miner', 'coalminer', 'collier'],
+            'Farm Worker': ['agricultural labourer', 'farm labourer', 'farm worker'],
+            'Servant': ['servant', 'domestic servant'],
+            'Labourer': ['labourer', 'laborer', 'general labourer']
+        }
+        self.occupation_patterns = {
+            'apprentice_pattern': 'apprentice',
+            'assistant_pattern': 'assistant'
+        }
+    
     def _use_default_mappings(self):
+        """Fallback to empty default mappings if config file fails to load."""
+        self.nation_counties = {
+            'England': [],
+            'Wales': [],
+            'Scotland': [],
+            'Ireland': [],
+            'Jamaica': [],
+            'USA': [],
+            'France': [],
+            'Australia': []
+        }
+        self.county_places = {}
+        self.nation_places = {}
+    
+    def _group_occupation(self, occupation_text: str) -> str:
+        """
+        Group an occupation under a standardized category.
+        
+        Args:
+            occupation_text: Raw occupation text from the data
+            
+        Returns:
+            Grouped occupation name, or original text if no group found
+        """
+        if not occupation_text:
+            return occupation_text
+            
+        occupation_lower = occupation_text.lower().strip()
+        
+        # Check each occupation group for exact matches only
+        for group_name, aliases in self.occupation_groups.items():
+            for alias in aliases:
+                alias_lower = alias.lower()
+                # Check for exact match only
+                if occupation_lower == alias_lower:
+                    return group_name
+        
+        # Check for pattern matches (apprentice, assistant, etc.)
+        for pattern_name, pattern in self.occupation_patterns.items():
+            if pattern.lower() in occupation_lower:
+                # Try to extract the base occupation and group it
+                base_occupation = occupation_lower.replace(pattern.lower(), '').strip()
+                if base_occupation:
+                    grouped_base = self._group_occupation(base_occupation)
+                    if grouped_base != base_occupation:
+                        return f"{pattern.title()} {grouped_base}"
+                    else:
+                        return f"{pattern.title()} {base_occupation.title()}"
+                else:
+                    return pattern.title()
+        
+        # Return original if no grouping found
+        return occupation_text
         """Fallback to empty default mappings if config file fails to load."""
         self.nation_counties = {
             'England': [],
@@ -1941,88 +2093,7 @@ class ReportQueryHandler:
             print("Analyzing occupations for all individuals...")
             individuals = self.database.get_all_individuals()
         
-        # Debug mode: Ask user if they want to see raw data structure
-        debug_choice = input("Show raw record structure for debugging? (y/n): ").strip().lower()
-        if debug_choice in ['y', 'yes']:
-            self._debug_occupation_extraction = True
-            print("\n--- DEBUG MODE: Raw Record Structure ---")
-            print("Looking for individuals from census period (1841-1921) with potential occupation data...")
-            
-            # Show structure for individuals from census period
-            debug_count = 0
-            census_individuals = []
-            
-            # First, find individuals from the census period
-            for individual in individuals:
-                if hasattr(individual, 'birth_year') and individual.birth_year:
-                    # Look for people born between 1820-1900 (would be adults during census period)
-                    if 1820 <= individual.birth_year <= 1900:
-                        census_individuals.append(individual)
-            
-            if not census_individuals:
-                print("No individuals found from census period, showing first 3 individuals instead...")
-                census_individuals = individuals[:3]
-            else:
-                print(f"Found {len(census_individuals)} individuals from census period, showing first 5...")
-                census_individuals = census_individuals[:5]
-            
-            for individual in census_individuals:
-                if debug_count >= 5:
-                    break
-                if hasattr(individual, 'raw_record') and individual.raw_record:
-                    print(f"\nDEBUG Individual: {individual.name} (ID: {individual.xref_id})")
-                    if hasattr(individual, 'birth_year') and individual.birth_year:
-                        print(f"  Birth Year: {individual.birth_year}")
-                    
-                    print("Available tags in raw record:")
-                    for sub in individual.raw_record.sub_records:
-                        # Handle different value types safely
-                        try:
-                            if sub.value:
-                                # Convert value to string safely
-                                value_str = str(sub.value)
-                                if len(value_str) > 100:
-                                    value_display = value_str[:100] + "..."
-                                else:
-                                    value_display = value_str
-                                print(f"  {sub.tag}: {value_display}")
-                            else:
-                                print(f"  {sub.tag}: [no value]")
-                                
-                            # Show sub-records for key event tags AND source/note tags
-                            if sub.tag in ['BIRT', 'DEAT', 'RESI', 'MARR', 'CENS', 'EVEN', 'FACT', 'BAPM', 'BURI', 'NOTE', 'SOUR']:
-                                try:
-                                    if hasattr(sub, 'sub_records') and sub.sub_records:
-                                        for sub2 in sub.sub_records:
-                                            if sub2.value:
-                                                sub_value_str = str(sub2.value)
-                                                if len(sub_value_str) > 80:
-                                                    sub_value_display = sub_value_str[:80] + "..."
-                                                else:
-                                                    sub_value_display = sub_value_str
-                                                print(f"    └─ {sub2.tag}: {sub_value_display}")
-                                            else:
-                                                print(f"    └─ {sub2.tag}: [no value]")
-                                                
-                                            # Show third level for source records
-                                            if sub2.tag in ['TEXT', 'NOTE', 'DATA'] and hasattr(sub2, 'sub_records') and sub2.sub_records:
-                                                for sub3 in sub2.sub_records:
-                                                    if sub3.value:
-                                                        sub3_value_str = str(sub3.value)
-                                                        if len(sub3_value_str) > 60:
-                                                            sub3_value_display = sub3_value_str[:60] + "..."
-                                                        else:
-                                                            sub3_value_display = sub3_value_str
-                                                        print(f"      └─ {sub3.tag}: {sub3_value_display}")
-                                except Exception as e:
-                                    print(f"    └─ [error reading sub-records: {e}]")
-                                    
-                        except Exception as e:
-                            print(f"  {sub.tag}: [error reading value: {e}]")
-                    debug_count += 1
-            
-            print("\n--- END DEBUG MODE ---")
-            input("Press Enter to continue with occupation analysis...")
+        print("Processing occupation data...")
         
         # Process each individual and collect occupation data
         individuals_with_occupations = []
@@ -2040,21 +2111,7 @@ class ReportQueryHandler:
                     'occupations': occupations
                 })
         
-        # If still no data found, offer to show all available tags
-        if individuals_with_data == 0 and not debug_choice in ['y', 'yes']:
-            show_all_tags = input("Still no occupation data found. Show all unique tags in dataset? (y/n): ").strip().lower()
-            if show_all_tags in ['y', 'yes']:
-                all_tags = set()
-                for individual in individuals[:20]:  # Check first 20 individuals
-                    if hasattr(individual, 'raw_record') and individual.raw_record:
-                        for sub in individual.raw_record.sub_records:
-                            all_tags.add(sub.tag)
-                
-                print(f"\nUnique tags found in dataset: {sorted(all_tags)}")
-                print("Look for occupation-related tags like OCCU, PROF, TITL, or within CENS/EVEN records.")
-                input("Press Enter to continue...")
-        
-        # Display results
+        # Display results summary
         print(f"\n{'='*60}")
         print(f"OCCUPATION ANALYSIS RESULTS")
         print(f"{'='*60}")
@@ -2064,53 +2121,119 @@ class ReportQueryHandler:
         
         if individuals_with_occupations:
             # Count and group occupations
-            occupation_counts = {}
+            occupation_counts = {}  # For original occupations
+            grouped_occupation_counts = {}  # For grouped occupations
             all_occupations = []
+            occupation_years = {}  # Track years for each occupation
             
             for entry in individuals_with_occupations:
                 for occupation in entry['occupations']:
                     occ_text = occupation['occupation'].strip()
                     all_occupations.append(occ_text)
+                    
+                    # Count original occupation
                     if occ_text in occupation_counts:
                         occupation_counts[occ_text] += 1
                     else:
                         occupation_counts[occ_text] = 1
+                    
+                    # Group the occupation and count grouped version
+                    grouped_occ = self._group_occupation(occ_text)
+                    if grouped_occ in grouped_occupation_counts:
+                        grouped_occupation_counts[grouped_occ] += 1
+                    else:
+                        grouped_occupation_counts[grouped_occ] = 1
+                    
+                    # Track years for timeline information
+                    year_info = occupation.get('year')
+                    if year_info:
+                        if grouped_occ not in occupation_years:
+                            occupation_years[grouped_occ] = []
+                        occupation_years[grouped_occ].append({
+                            'year': year_info,
+                            'individual': entry['individual'].name,
+                            'original_occupation': occ_text
+                        })
             
-            # Display occupation counts first
-            print(f"\n--- OCCUPATION COUNTS ---")
+            # Display occupation counts first - show both grouped and original
+            print(f"\n--- OCCUPATION SUMMARY ---")
             print(f"Total occupation entries found: {len(all_occupations)}")
-            print(f"Unique occupations: {len(occupation_counts)}")
-            print(f"\nOccupation frequency (sorted by count):")
+            print(f"Unique original occupations: {len(occupation_counts)}")
+            print(f"Unique grouped occupations: {len(grouped_occupation_counts)}")
             
-            # Sort by count (descending), then by name
+            print(f"\n--- GROUPED OCCUPATION FREQUENCY ---")
+            print("(Sorted by count, showing normalized occupation groups)")
+            
+            # Sort grouped occupations by count (descending), then by name
+            sorted_grouped = sorted(grouped_occupation_counts.items(), key=lambda x: (-x[1], x[0]))
+            
+            for grouped_occ, count in sorted_grouped:
+                print(f"  {grouped_occ}: {count}")
+                
+                # Show year range if available
+                if grouped_occ in occupation_years:
+                    years = [entry['year'] for entry in occupation_years[grouped_occ] if entry['year']]
+                    if years:
+                        min_year = min(years)
+                        max_year = max(years)
+                        if min_year == max_year:
+                            print(f"    (Year: {min_year})")
+                        else:
+                            print(f"    (Years: {min_year}-{max_year})")
+            
+            print(f"\n--- ORIGINAL OCCUPATION FREQUENCY ---")
+            print("(Sorted by count, showing exact text as found in records)")
+            
+            # Sort original occupations by count (descending), then by name
             sorted_occupations = sorted(occupation_counts.items(), key=lambda x: (-x[1], x[0]))
             
             for occupation, count in sorted_occupations:
-                print(f"  {occupation}: {count}")
+                grouped_version = self._group_occupation(occupation)
+                if grouped_version != occupation:
+                    print(f"  {occupation}: {count} → {grouped_version}")
+                else:
+                    print(f"  {occupation}: {count}")
             
-            print(f"\n--- INDIVIDUALS WITH OCCUPATIONS ---")
-            
-            # Sort by name for consistent display
-            individuals_with_occupations.sort(key=lambda x: x['individual'].name or 'Unknown')
-            
-            for i, entry in enumerate(individuals_with_occupations, 1):
-                individual = entry['individual']
-                occupations = entry['occupations']
+            # Ask if user wants to see individual breakdown
+            show_individuals = input(f"\nShow breakdown by individual? (y/n): ").strip().lower()
+            if show_individuals in ['y', 'yes']:
+                print(f"\n--- INDIVIDUALS WITH OCCUPATIONS ---")
                 
-                # Display individual with number
-                birth_year = individual.birth_year or "Unknown"
-                death_year = individual.death_year or "Unknown"
+                # Sort by name for consistent display
+                individuals_with_occupations.sort(key=lambda x: x['individual'].name or 'Unknown')
                 
-                print(f"\n{i:3}. {individual.name}")
-                print(f"     Birth: {birth_year} | Death: {death_year}")
-                print(f"     ID: {individual.xref_id}")
-                
-                # Display occupations indented
-                for occupation in occupations:
-                    if occupation.get('source_info'):
-                        print(f"      • {occupation['occupation']} ({occupation['source_info']})")
-                    else:
-                        print(f"      • {occupation['occupation']}")
+                for i, entry in enumerate(individuals_with_occupations, 1):
+                    individual = entry['individual']
+                    occupations = entry['occupations']
+                    
+                    # Display individual with number and compact birth/death years
+                    birth_year = individual.birth_year or "?"
+                    death_year = individual.death_year or "?"
+                    year_range = f"({birth_year}-{death_year})"
+                    
+                    print(f"\n{i:3}. {individual.name} {year_range}")
+                    print(f"     ID: {individual.xref_id}")
+                    
+                    # Display occupations indented with grouping information
+                    for occupation in occupations:
+                        original_occ = occupation['occupation']
+                        grouped_occ = self._group_occupation(original_occ)
+                        year_info = occupation.get('year')
+                        source_info = occupation.get('source_info', '')
+                        
+                        # Build display string - prioritize year info
+                        display_parts = []
+                        if year_info:
+                            display_parts.append(str(year_info))
+                        if source_info:
+                            display_parts.append(source_info)
+                        
+                        context_info = f" ({', '.join(display_parts)})" if display_parts else ""
+                        
+                        if grouped_occ != original_occ:
+                            print(f"      • {original_occ} → {grouped_occ}{context_info}")
+                        else:
+                            print(f"      • {original_occ}{context_info}")
         else:
             print(f"\nNo occupation data found for any individuals in the current dataset.")
             print("This could mean:")
@@ -2118,7 +2241,7 @@ class ReportQueryHandler:
             print("  • Occupation data is stored in a different format")
             print("  • Occupation data is embedded within other record types")
         
-        # Clean up debug flag
+        # Clean up debug flag (if it exists)
         if hasattr(self, '_debug_occupation_extraction'):
             delattr(self, '_debug_occupation_extraction')
         
@@ -2144,6 +2267,10 @@ class ReportQueryHandler:
                     for occ_data in enhanced_occupations:
                         occupation_text = occ_data.get('occupation', '').strip()
                         if occupation_text:
+                            # Skip "private" - treat same as blank/not stated
+                            if occupation_text.lower().strip() == 'private':
+                                continue
+                                
                             source_parts = []
                             
                             # Build source info
@@ -2159,9 +2286,18 @@ class ReportQueryHandler:
                             if place_info:
                                 source_parts.append(str(place_info))
                             
+                            # Extract year from date_info for timeline
+                            year = None
+                            if date_info:
+                                # Try to extract year from various date formats
+                                year_match = re.search(r'\b(1[8-9]\d{2}|20[0-2]\d)\b', str(date_info))
+                                if year_match:
+                                    year = int(year_match.group(1))
+                            
                             occupation_data = {
                                 'occupation': occupation_text,
-                                'source_info': ', '.join(source_parts) if source_parts else None
+                                'source_info': ', '.join(source_parts) if source_parts else None,
+                                'year': year
                             }
                             occupations.append(occupation_data)
                     
@@ -2170,8 +2306,7 @@ class ReportQueryHandler:
                         return occupations
             except Exception as e:
                 # If enhanced method fails, fall back to manual extraction
-                if hasattr(self, '_debug_occupation_extraction') and self._debug_occupation_extraction:
-                    print(f"DEBUG: Enhanced occupation method failed for {individual.name}: {e}")
+                pass
         
         # Fallback to manual extraction if enhanced method didn't work
         if hasattr(individual, 'raw_record') and individual.raw_record:
@@ -2212,10 +2347,15 @@ class ReportQueryHandler:
                     continue
                 
                 if occupation_value:
+                    # Skip "private" - treat same as blank/not stated
+                    if occupation_value.lower().strip() == 'private':
+                        continue
+                        
                     # Extract basic occupation
                     occupation_data = {
                         'occupation': occupation_value,
-                        'source_info': None
+                        'source_info': None,
+                        'year': None
                     }
                     
                     # Look for date and source information in sub-records
@@ -2237,6 +2377,12 @@ class ReportQueryHandler:
                     except Exception:
                         # Skip sub-records if there are issues
                         pass
+                    
+                    # Extract year from date_info for timeline
+                    if date_info:
+                        year_match = re.search(r'\b(1[8-9]\d{2}|20[0-2]\d)\b', str(date_info))
+                        if year_match:
+                            occupation_data['year'] = int(year_match.group(1))
                     
                     # Build source info string
                     source_parts = []
@@ -2285,10 +2431,21 @@ class ReportQueryHandler:
                                             event_occupation = str(sub.value).strip()
                         
                         if event_occupation:
+                            # Skip "private" - treat same as blank/not stated
+                            if event_occupation.lower().strip() == 'private':
+                                continue
+                                
                             occupation_data = {
                                 'occupation': event_occupation,
-                                'source_info': None
+                                'source_info': None,
+                                'year': None
                             }
+                            
+                            # Extract year from event_date for timeline
+                            if event_date:
+                                year_match = re.search(r'\b(1[8-9]\d{2}|20[0-2]\d)\b', str(event_date))
+                                if year_match:
+                                    occupation_data['year'] = int(year_match.group(1))
                             
                             # Build source info for event-based occupation
                             source_parts = []
