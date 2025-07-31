@@ -80,7 +80,40 @@ class MenuSystem:
             "d": MenuCategory("Data Management", 
                                "Import, export, and modify data", "d")
         }
-    
+
+    def switch_gedcom_file(self):
+        """Switch to a different GEDCOM file."""
+        print("\n" + "="*50)
+        print("SWITCH GEDCOM FILE")
+        print("="*50)
+        
+        # Warn about ancestor filter reset
+        if self.ancestor_filter_ids:
+            print("⚠️  WARNING: You currently have a root ancestor filter active.")
+            print("   This will be reset when switching files as the person may not")
+            print("   exist in the new file.")
+            print()
+            
+            confirm = input("Continue with file switch? (y/N): ").strip().lower()
+            if confirm != 'y':
+                print("File switch cancelled.")
+                return
+        
+        # Load new file
+        if self.database.load_file():
+            # Reset ancestor filter state
+            self.ancestor_filter_ids = None
+            self.root_ancestor = None
+            self.filtering_mode = None
+            self.tree_constraints = None
+            self.update_validity_handler_context()
+            
+            print("\n✓ GEDCOM file switched successfully!")
+            input("\nPress Enter to continue...")
+        else:
+            print("Failed to switch GEDCOM file.")
+            input("\nPress Enter to continue...")
+
     def _register_menu_options(self):
         """Register all available menu options organized by category."""
         
@@ -105,6 +138,9 @@ class MenuSystem:
         self._add_option("6", "Show individuals not in current tree",
                         self.validity_handler.find_individuals_not_in_ancestry_tree, "v", ["read"])
 
+        self._add_option("7", "Show individuals who lived past a specific age",
+                self.validity_handler.find_individuals_who_lived_past_age, "v", ["read", "dates"])
+
         
         # === SEARCH & NAVIGATION ===
         self._add_option("1", "Find individual by name", 
@@ -115,7 +151,10 @@ class MenuSystem:
         
         self._add_option("3", "To Do - Clear ancestor filter (analyze all individuals)", 
                         self._placeholder_handler, "s", ["read"])
-        
+
+        self._add_option("4", "Show tree of descendants", 
+                        self.search_handler.show_descendant_tree, "s", ["read", "relationships"])
+
         # === ANALYSIS REPORTS ===
         self._add_option("1", "Birth place analysis (nations summary)", 
                         self.report_handler.analyze_birth_places_summary, "r", ["read", "places"])
@@ -126,15 +165,12 @@ class MenuSystem:
         self._add_option("3", "Occupation analysis and counts", 
                         self.report_handler.analyze_occupations, "r", ["read", "occupations"])
         
-        self._add_option("4", "To Do - Oldest individuals (by birth year)", 
-                        self._placeholder_handler, "r", ["read", "dates"])
-        
-        self._add_option("5", "To Do - Individuals with multiple birth places", 
-                        self._placeholder_handler, "r", ["read", "places"])
-        
-        self._add_option("6", "To Doooooo - Detailed birth information for individual", 
-                        self._placeholder_handler, "r", ["read", "places", "dates"])
-        
+        self._add_option("4", "Oldest individuals (by birth year)", 
+                        self.report_handler.analyse_oldest_individuals, "r", ["read", "dates"])
+
+        self._add_option("6", "Analyse age ranges", 
+                        self.database.analyse_years_lived, "r", ["read", "dates"])
+
         self._add_option("7", "Scan all census sources for occupation-like data",
                         self.database.scan_census_sources_for_occupations, "r", ["read", "occupations"])
 
@@ -155,7 +191,6 @@ class MenuSystem:
         self._add_option("3", "To Do - Import additional data", 
                         self._placeholder_handler, "d", ["read", "write"])
 
-    
     def _add_option(self, key: str, description: str, handler: Callable, 
                    category: str, required_capabilities: List[str]):
         """Add a menu option to the specified category."""
@@ -225,6 +260,8 @@ class MenuSystem:
             print("a. (Re)Set Root Ancestor - Reset or change current ancestor filter")
         else:
             print("a. (Re)Set Root Ancestor - Filter analysis to specific ancestor lineage")
+        
+        print("f. Switch GEDCOM file")  # Add this line
         print()
         
         for category in available_categories:
@@ -285,6 +322,10 @@ class MenuSystem:
                 # Handle (Re)Set Root Ancestor
                 self._handle_set_root_ancestor()
                 return True
+            elif choice == 'f':  # Add this elif block
+                # Handle Switch GEDCOM file
+                self.switch_gedcom_file()
+                return True
             elif choice in self.categories:
                 self.current_category = choice
                 return True
@@ -329,7 +370,7 @@ class MenuSystem:
             self.display_menu()
             
             if self.current_category is None:
-                choice = input(f"\nChoose a category or 'a' for ancestor filtering (or 'q' to quit): ").strip()
+                choice = input(f"\nChoose a category, 'a' for ancestor filtering, 'f' to switch files (or 'q' to quit): ").strip()
             else:
                 choice = input(f"\nChoose an option (1-9, 'b' for back, 'q' to quit): ").strip()
             

@@ -545,7 +545,215 @@ class SearchQueryHandler:
             action_callback=callback,
             show_birth_death=True
         )
-    
+
+    def show_descendant_tree(self):
+        """
+        Show tree of descendants from a selected individual.
+        Uses depth-first search to find the longest descendant lineage.
+        """
+        print("\n--- Show Tree of Descendants ---")
+        
+        # Get all individuals (ignore any current ancestor filter for this analysis)
+        all_individuals = self.database.get_all_individuals()
+        
+        # Let user select a person
+        print("Select a person to trace descendants from:")
+        search_name = input("Enter name to search for: ").strip()
+        if not search_name:
+            print("No name entered.")
+            input("\nPress Enter to continue...")
+            return
+        
+        # Search for matching individuals
+        matching_individuals = []
+        search_lower = search_name.lower()
+        
+        for individual in all_individuals:
+            if individual.name and search_lower in individual.name.lower():
+                matching_individuals.append(individual)
+        
+        if not matching_individuals:
+            print(f"No individuals found matching '{search_name}'.")
+            input("\nPress Enter to continue...")
+            return
+        
+        # Display matches and let user select
+        print(f"\nFound {len(matching_individuals)} matching individual(s):")
+        for i, individual in enumerate(matching_individuals, 1):
+            birth_year = individual.birth_year or "?"
+            death_year = individual.death_year or "?"
+            print(f"{i:2}. {individual.name} ({birth_year}-{death_year}) [{individual.xref_id}]")
+        
+        # Get user selection
+        while True:
+            try:
+                choice = input(f"\nSelect individual (1-{len(matching_individuals)}): ").strip()
+                if not choice:
+                    print("Selection cancelled.")
+                    input("\nPress Enter to continue...")
+                    return
+                
+                index = int(choice) - 1
+                if 0 <= index < len(matching_individuals):
+                    selected_person = matching_individuals[index]
+                    break
+                else:
+                    print(f"Please enter a number between 1 and {len(matching_individuals)}.")
+            except ValueError:
+                print("Please enter a valid number.")
+        
+        print(f"\nTracing descendants from: {selected_person.name}")
+        print("=" * 60)
+        
+        # Find the longest descendant path using depth-first search
+        longest_path = self._find_longest_descendant_path(selected_person)
+        
+        if not longest_path['path'] or len(longest_path['path']) <= 1:
+            print(f"\nNo descendants found for {selected_person.name}.")
+            print("This person either has no children recorded, or their children have no descendants.")
+        else:
+            generations = longest_path['generations']
+            path = longest_path['path']
+            
+            print(f"\nLongest descendant lineage: {generations} generation(s)")
+            print(f"Path length: {len(path)} individuals\n")
+            
+            # Display the complete lineage
+            print("DESCENDANT LINEAGE:")
+            print("-" * 40)
+            
+            for i, person in enumerate(path):
+                indent = "  " * i
+                birth_year = person.birth_year or "?"
+                death_year = person.death_year or "?"
+                
+                # Show relationship
+                if i == 0:
+                    relationship = "Root ancestor"
+                elif i == 1:
+                    relationship = "Child"
+                elif i == 2:
+                    relationship = "Grandchild"
+                elif i == 3:
+                    relationship = "Great-grandchild"
+                else:
+                    greats = "Great-" * (i - 2)
+                    relationship = f"{greats}grandchild"
+                
+                print(f"{indent}{person.name} ({birth_year}-{death_year})")
+                print(f"{indent}└─ {relationship}")
+                
+                if i < len(path) - 1:
+                    print(f"{indent}   │")
+            
+            print(f"\nThis lineage spans {generations} generation(s) from {path[0].name} to {path[-1].name}.")
+            
+            # Show additional statistics
+            children_counts = []
+            for person in path[:-1]:  # Exclude the last person (leaf node)
+                children = self._get_children(person)
+                children_counts.append(len(children))
+            
+            if children_counts:
+                avg_children = sum(children_counts) / len(children_counts)
+                print(f"Average children per generation in this lineage: {avg_children:.1f}")
+        
+        input("\nPress Enter to continue...")
+
+    def _find_longest_descendant_path(self, root_person):
+        """
+        Find the longest descendant path from the given person using depth-first search.
+        
+        Returns:
+            dict with 'path' (list of individuals) and 'generations' (number of generations)
+        """
+        def dfs_longest_path(person, current_path, visited):
+            """
+            Recursive depth-first search to find longest path.
+            
+            Args:
+                person: Current person to explore
+                current_path: List of people in current path
+                visited: Set of person IDs already visited (to avoid cycles)
+            
+            Returns:
+                dict with longest path found from this person
+            """
+            # Avoid infinite loops from circular family relationships
+            if person.xref_id in visited:
+                return {'path': current_path[:], 'generations': len(current_path) - 1}
+            
+            visited.add(person.xref_id)
+            
+            # Get children of current person
+            children = self._get_children(person)
+            
+            if not children:
+                # Leaf node - return current path
+                result = {'path': current_path[:], 'generations': len(current_path) - 1}
+                visited.remove(person.xref_id)
+                return result
+            
+            # Explore all children and find the longest path
+            longest_result = {'path': current_path[:], 'generations': len(current_path) - 1}
+            
+            for child in children:
+                # Recursive call with child added to path
+                child_path = current_path + [child]
+                child_result = dfs_longest_path(child, child_path, visited)
+                
+                # Keep the longest path found
+                if child_result['generations'] > longest_result['generations']:
+                    longest_result = child_result
+            
+            visited.remove(person.xref_id)
+            return longest_result
+        
+        # Start the search
+        initial_path = [root_person]
+        visited = set()
+        
+        return dfs_longest_path(root_person, initial_path, visited)
+
+    def _get_children(self, person):
+        """
+        Get all children of a given person.
+        
+        Returns:
+            List of Individual objects representing the children
+        """
+        children = []
+        
+        if not hasattr(person, 'raw_record') or not person.raw_record:
+            return children
+        
+        # Find families where this person is a spouse (FAMS)
+        family_ids = []
+        for sub in person.raw_record.sub_records:
+            if sub.tag == 'FAMS':
+                family_ids.append(str(sub.value))
+        
+        # For each family, find children
+        if hasattr(self.database, '_family_index'):
+            for family_id in family_ids:
+                family = self.database._family_index.get(family_id)
+                if family and hasattr(family, 'raw_record'):
+                    # Find children in family
+                    for fam_sub in family.raw_record.sub_records:
+                        if fam_sub.tag == 'CHIL':
+                            child_id = str(fam_sub.value)
+                            if hasattr(self.database, '_individual_index'):
+                                child = self.database._individual_index.get(child_id)
+                                if child:
+                                    children.append(child)
+        
+        # Sort children by birth year if available
+        def sort_key(child):
+            return child.birth_year or 9999  # Put unknown birth years at end
+        
+        children.sort(key=sort_key)
+        return children
+
 class ValidityQueryHandler:
     """Handles data validity and quality checks."""
     
@@ -754,6 +962,249 @@ class ValidityQueryHandler:
                 print(f"• {ind.name} [{birth}-{death}] [{ind.xref_id}]")
             print(f"\nTotal individuals NOT in current ancestry tree: {len(not_in_tree)}")
         input("\nPress Enter to continue...")
+
+    def find_individuals_who_lived_past_age(self):
+        """
+        Find and display individuals who lived past a user-specified age.
+        Shows compressed format with name, dates, and age on one line.
+        """
+        print("\n--- Validity Check: Individuals Who Lived Past Specific Age ---")
+        
+        # Get target age from user
+        while True:
+            try:
+                age_str = input("Enter minimum age to search for: ").strip()
+                if not age_str:
+                    print("No age entered.")
+                    input("\nPress Enter to continue...")
+                    return
+                
+                target_age = int(age_str)
+                if target_age < 0:
+                    print("Please enter a positive age.")
+                    continue
+                break
+            except ValueError:
+                print("Please enter a valid number.")
+                continue
+        
+        # Ask what type of records to show
+        print(f"\nWhat records do you want to see for people who lived past age {target_age}?")
+        print("1. Just people with known birth and death dates")
+        print("2. Just people with unknown death dates")
+        print("3. Everyone (both known and unknown death dates)")
+        
+        while True:
+            filter_choice = input("\nChoose option (1-3): ").strip()
+            if filter_choice in ['1', '2', '3']:
+                break
+            print("Please enter 1, 2, or 3.")
+        
+        # Get individuals based on current filtering
+        if self.ancestor_filter_ids:
+            individuals = [ind for ind in self.database.get_all_individuals() 
+                        if ind.xref_id in self.ancestor_filter_ids]
+            tree_context = f"current ancestry tree ({len(self.ancestor_filter_ids)} individuals)"
+        else:
+            individuals = self.database.get_all_individuals()
+            tree_context = f"entire database ({len(individuals)} individuals)"
+        
+        # Find individuals who lived past the target age
+        qualifying_individuals = []
+        
+        for ind in individuals:
+            # Skip if no birth year
+            if not ind.birth_year:
+                continue
+                
+            # Check death status and apply filter
+            if filter_choice == '1':
+                # Only people with known death dates
+                if not ind.is_deceased() or not ind.death_year:
+                    continue
+                age_at_death = ind.death_year - ind.birth_year
+                if age_at_death < 0:
+                    continue
+                if age_at_death >= target_age:
+                    qualifying_individuals.append((ind, age_at_death))
+                    
+            elif filter_choice == '2':
+                # Only people with unknown death dates
+                if ind.is_deceased():
+                    continue
+                # Calculate current age (assume still alive)
+                from datetime import datetime
+                current_year = datetime.now().year
+                current_age = current_year - ind.birth_year
+                if current_age >= target_age:
+                    qualifying_individuals.append((ind, None))
+                    
+            else:  # filter_choice == '3'
+                # Everyone
+                if ind.is_deceased() and ind.death_year:
+                    age_at_death = ind.death_year - ind.birth_year
+                    if age_at_death < 0:
+                        continue
+                    if age_at_death >= target_age:
+                        qualifying_individuals.append((ind, age_at_death))
+                elif not ind.is_deceased():
+                    # Not deceased - calculate current age
+                    from datetime import datetime
+                    current_year = datetime.now().year
+                    current_age = current_year - ind.birth_year
+                    if current_age >= target_age:
+                        qualifying_individuals.append((ind, None))
+        
+        # Sort by age at death (oldest first), then by birth year for those without death dates
+        qualifying_individuals.sort(key=lambda x: (-x[1] if x[1] is not None else -9999, x[0].birth_year))
+        
+        total_count = len(qualifying_individuals)
+        
+        filter_descriptions = {
+            '1': "with known birth and death dates",
+            '2': "with unknown death dates", 
+            '3': "with known and unknown death dates"
+        }
+        
+        print(f"\nFound {total_count} individual(s) {filter_descriptions[filter_choice]} in {tree_context} who lived to age {target_age} or older.")
+        
+        if total_count == 0:
+            input("\nPress Enter to continue...")
+            return
+        
+        # Ask if user wants to see all if more than 50
+        show_all = True
+        if total_count > 50:
+            choice = input(f"\nThere are {total_count} results. Display all? (y/n): ").strip().lower()
+            show_all = choice in ['y', 'yes']
+        
+        if not show_all:
+            print("Display cancelled.")
+            input("\nPress Enter to continue...")
+            return
+        
+        # Display results
+        print(f"\n=== Individuals Who Lived to Age {target_age}+ ===")
+        print(f"Showing: {filter_descriptions[filter_choice]}")
+        print("(Sorted by age at death, oldest first)\n")
+        
+        for i, (individual, age_at_death) in enumerate(qualifying_individuals, 1):
+            # Format birth date
+            birth_info = str(individual.birth_year)
+            if individual.birth_date:
+                birth_info = individual.birth_date.strftime('%d %b %Y')
+            
+            # Format death date and age
+            if age_at_death is not None:
+                death_info = str(individual.death_year)
+                if individual.death_date:
+                    death_info = individual.death_date.strftime('%d %b %Y')
+                print(f"{i:3}. {individual.name} ({birth_info} - {death_info}, age {age_at_death})")
+            else:
+                # No death date - show main line first, then additional info on next line
+                print(f"{i:3}. {individual.name} ({birth_info} - ?)")
+                
+                # Get additional info for next line
+                additional_info = []
+                
+                # Get marriage date
+                marriage_date = self._get_marriage_date(individual)
+                if marriage_date:
+                    additional_info.append(f"married {marriage_date}")
+                
+                # Get child birth dates
+                first_child_date, last_child_date = self._get_child_birth_dates(individual)
+                if first_child_date:
+                    if last_child_date and last_child_date != first_child_date:
+                        additional_info.append(f"first child born {first_child_date}, last child born {last_child_date}")
+                    else:
+                        additional_info.append(f"child born {first_child_date}")
+                
+                # Print additional info on next line if available
+                if additional_info:
+                    print(f"     {', '.join(additional_info)}")
+        
+        print(f"\nTotal: {total_count} individual(s) who lived to age {target_age} or older.")
+        input("\nPress Enter to continue...")
+
+    def _get_marriage_date(self, individual):
+        """Get the marriage date for an individual (first marriage if multiple)."""
+        if not hasattr(individual, 'raw_record') or not individual.raw_record:
+            return None
+        
+        # Find family as spouse (FAMS)
+        for sub in individual.raw_record.sub_records:
+            if sub.tag == 'FAMS':
+                family_id = str(sub.value)
+                # Look up the family record
+                if hasattr(self.database, '_family_index'):
+                    family = self.database._family_index.get(family_id)
+                    if family and hasattr(family, 'raw_record'):
+                        # Look for marriage date in family record
+                        for fam_sub in family.raw_record.sub_records:
+                            if fam_sub.tag in ['MARR', 'MARRIAGE']:
+                                for date_sub in getattr(fam_sub, 'sub_records', []):
+                                    if date_sub.tag == 'DATE' and date_sub.value:
+                                        date_str = str(date_sub.value).strip()
+                                        # Try to format as date
+                                        try:
+                                            from datetime import datetime
+                                            # Try common GEDCOM date formats
+                                            for fmt in ['%d %b %Y', '%d %B %Y', '%Y']:
+                                                try:
+                                                    parsed_date = datetime.strptime(date_str, fmt)
+                                                    return parsed_date.strftime('%d %b %Y')
+                                                except ValueError:
+                                                    continue
+                                            # If parsing fails, return as-is
+                                            return date_str
+                                        except:
+                                            return date_str
+                break  # Only return first marriage
+        return None
+
+    def _get_child_birth_dates(self, individual):
+        """Get first and last child birth dates for an individual."""
+        child_dates = []
+        
+        if not hasattr(individual, 'raw_record') or not individual.raw_record:
+            return None, None
+        
+        # Find families as spouse (FAMS)
+        family_ids = []
+        for sub in individual.raw_record.sub_records:
+            if sub.tag == 'FAMS':
+                family_ids.append(str(sub.value))
+        
+        # For each family, find children
+        if hasattr(self.database, '_family_index'):
+            for family_id in family_ids:
+                family = self.database._family_index.get(family_id)
+                if family and hasattr(family, 'raw_record'):
+                    # Find children in family
+                    for fam_sub in family.raw_record.sub_records:
+                        if fam_sub.tag == 'CHIL':
+                            child_id = str(fam_sub.value)
+                            if hasattr(self.database, '_individual_index'):
+                                child = self.database._individual_index.get(child_id)
+                                if child:
+                                    if child.birth_date:
+                                        child_dates.append((child.birth_date, child.birth_date.strftime('%d %b %Y')))
+                                    elif child.birth_year:
+                                        # Create a sortable date object for year-only dates
+                                        from datetime import datetime
+                                        year_date = datetime(child.birth_year, 1, 1)
+                                        child_dates.append((year_date, str(child.birth_year)))
+        
+        if not child_dates:
+            return None, None
+        
+        # Sort by actual date and return formatted strings
+        child_dates.sort(key=lambda x: x[0])
+        first_date = child_dates[0][1]
+        last_date = child_dates[-1][1] if len(child_dates) > 1 else first_date
+        
+        return first_date, last_date if first_date != last_date else None
 
 class ReportQueryHandler:
     """Handles analysis and reporting queries."""
@@ -2467,6 +2918,90 @@ class ReportQueryHandler:
                         continue
         
         return occupations
+
+    def analyse_oldest_individuals(self):
+        """
+        Show the oldest 'n' individuals by birth year in the current tree.
+        Lists individuals from earliest birth year to latest.
+        """
+        print("\n--- Analysis Report: Oldest Individuals by Birth Year ---")
+        
+        # Get individuals based on current filtering
+        if self.ancestor_filter_ids:
+            individuals = [ind for ind in self.database.get_all_individuals() 
+                        if ind.xref_id in self.ancestor_filter_ids]
+            tree_context = f"current ancestry tree ({len(self.ancestor_filter_ids)} individuals)"
+        else:
+            individuals = self.database.get_all_individuals()
+            tree_context = f"entire database ({len(individuals)} individuals)"
+        
+        # Filter to only individuals with birth years
+        individuals_with_birth_years = [ind for ind in individuals if ind.birth_year is not None]
+        
+        if not individuals_with_birth_years:
+            print(f"\n❌ No individuals found with birth year data in {tree_context}.")
+            input("\nPress Enter to continue...")
+            return
+        
+        print(f"\nAnalyzing {len(individuals_with_birth_years)} individuals with birth year data from {tree_context}.")
+        
+        # Get number of individuals to show
+        while True:
+            try:
+                n_str = input(f"\nHow many oldest individuals to show? (1-{len(individuals_with_birth_years)}): ").strip()
+                if not n_str:
+                    print("No input provided.")
+                    continue
+                
+                n = int(n_str)
+                if n < 1:
+                    print("Please enter a number 1 or greater.")
+                    continue
+                elif n > len(individuals_with_birth_years):
+                    print(f"Maximum available is {len(individuals_with_birth_years)}.")
+                    n = len(individuals_with_birth_years)
+                    break
+                else:
+                    break
+            except ValueError:
+                print("Please enter a valid number.")
+                continue
+        
+        # Sort by birth year (earliest first)
+        sorted_individuals = sorted(individuals_with_birth_years, key=lambda x: x.birth_year)
+        oldest_n = sorted_individuals[:n]
+        
+        print(f"\n=== {n} Oldest Individuals by Birth Year ===")
+        print(f"(Sorted from earliest to most recent birth year)\n")
+        
+        for i, individual in enumerate(oldest_n, 1):
+            birth_year = individual.birth_year
+            death_year = individual.death_year if individual.death_year else "?"
+            
+            # Calculate age if both birth and death years are available
+            age_info = ""
+            if individual.birth_year and individual.death_year:
+                age = individual.death_year - individual.birth_year
+                age_info = f" (lived {age} years)"
+            elif individual.birth_year:
+                # Still alive or death year unknown
+                current_year = 2024  # You might want to use datetime.now().year
+                estimated_age = current_year - individual.birth_year
+                age_info = f" (age ~{estimated_age} if alive)"
+            
+            print(f"{i:3}. {individual.name}")
+            print(f"     Born: {birth_year} | Died: {death_year}{age_info}")
+            print(f"     ID: {individual.xref_id}")
+            print()
+        
+        # Show summary statistics
+        earliest_year = oldest_n[0].birth_year
+        latest_year = oldest_n[-1].birth_year
+        year_span = latest_year - earliest_year
+        
+        print(f"Birth year range: {earliest_year} to {latest_year} (span of {year_span} years)")
+        
+        input("\nPress Enter to continue...")
 
 
 class DataQueryHandler:

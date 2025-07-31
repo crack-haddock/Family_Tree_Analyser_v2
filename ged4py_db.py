@@ -6,6 +6,7 @@ Provides read-only access to GEDCOM files using the ged4py library.
 from typing import List, Optional
 from datetime import datetime
 from pathlib import Path
+from datetime import datetime
 import re
 import json
 import pickle
@@ -726,6 +727,46 @@ class Ged4PyIndividual(Individual):
 
         return blobs
 
+    def is_deceased(self) -> bool:
+        """
+        Determine if this individual is deceased based on available death information.
+        Checks both death_date and death_year properties, plus raw GEDCOM death records.
+        """
+        # Check parsed death date/year first
+        if self.death_date or self.death_year:
+            return True
+        
+        # Check raw GEDCOM record for any DEAT tag (even without date)
+        if hasattr(self, 'raw_record') and self.raw_record:
+            for sub in self.raw_record.sub_records:
+                if sub.tag == 'DEAT':
+                    return True  # Death event exists, even if no date
+        
+        return False
+
+    def get_death_info(self) -> dict:
+        """
+        Get comprehensive death information for debugging.
+        """
+        info = {
+            'has_death_date': self.death_date is not None,
+            'has_death_year': self.death_year is not None,
+            'death_date_value': self.death_date,
+            'death_year_value': self.death_year,
+            'has_deat_tag': False,
+            'raw_deat_values': []
+        }
+        
+        if hasattr(self, 'raw_record') and self.raw_record:
+            for sub in self.raw_record.sub_records:
+                if sub.tag == 'DEAT':
+                    info['has_deat_tag'] = True
+                    for sub2 in getattr(sub, 'sub_records', []):
+                        if sub2.tag == 'DATE' and sub2.value:
+                            info['raw_deat_values'].append(str(sub2.value))
+        
+        return info
+
 class Ged4PyFamily(Family):
     """Family wrapper for ged4py records."""
     
@@ -797,53 +838,66 @@ class Ged4PyGedcomDB(GedcomDB):
     def records(self):
         """Access to source records for occupation extraction."""
         return self._source_index
-    
-    def load_file(self, file_path: str) -> bool:
-        """Load GEDCOM file using ged4py with intelligent caching."""
-        if GedcomReader is None:
-            print("Error: ged4py library not available")
-            return False
+
+    def _select_gedcom_file(self) -> Optional[str]:
+        """Present a menu of .ged files in the 'ged' subfolder for user selection."""
+        ged_folder = self._base_dir / 'ged'
         
-        try:
-            # Convert to relative path if absolute
-            if Path(file_path).is_absolute():
-                self.file_path = str(Path(file_path).relative_to(self._base_dir))
-            else:
-                self.file_path = file_path
+        if not ged_folder.exists():
+            print(f"Error: 'ged' folder not found at {ged_folder}")
+            return None
+        
+        # Find all .ged files
+        ged_files = list(ged_folder.glob('*.ged'))
+        
+        if not ged_files:
+            print(f"No .ged files found in {ged_folder}")
+            return None
+        
+        # Sort by modification time (most recent first)
+        ged_files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
+        
+        print("\n=== Available GEDCOM Files ===")
+        print("(Ordered by date, most recent first)\n")
+        
+        for i, ged_file in enumerate(ged_files, 1):
+            # Get file stats
+            stat = ged_file.stat()
+            size_mb = stat.st_size / (1024 * 1024)
+            modified_time = datetime.fromtimestamp(stat.st_mtime)
             
-            # Test that we can open the file
-            full_path = self._base_dir / self.file_path
-            with GedcomReader(str(full_path)) as parser:
-                # Just test that it opens successfully
-                pass
-            self.is_loaded = True
+            # Mark the most recent file as default
+            default_marker = " (DEFAULT)" if i == 1 else ""
             
-            # Try to use cached indexes first
-            if self._should_use_cache():
-                start_time = time.time()
-                print("Loading cached indexes...")
-                if self._load_indexes_from_cache():
-                    end_time = time.time()
-                    print(f"Cached indexes loaded successfully. ({end_time - start_time:.3f} seconds)")
-                    return True
+            print(f"{i:2}. {ged_file.name}{default_marker}")
+            print(f"    Modified: {modified_time.strftime('%Y-%m-%d %H:%M:%S')}")
+            print(f"    Size: {size_mb:.1f} MB")
+            print()
+        
+        # Get user selection
+        while True:
+            try:
+                choice = input(f"Select file (1-{len(ged_files)}, or Enter for default): ").strip()
+                
+                if not choice:
+                    # Default to most recent (first in list)
+                    selected_file = ged_files[0]
+                    break
+                
+                index = int(choice) - 1
+                if 0 <= index < len(ged_files):
+                    selected_file = ged_files[index]
+                    break
                 else:
-                    print("Failed to load cached indexes, rebuilding...")
-            
-            # Build indexes from scratch
-            start_time = time.time()
-            print("Building relationship indexes for fast lookups...")
-            self._build_indexes()
-            
-            # Cache the indexes for next time
-            self._save_indexes_to_cache()
-            end_time = time.time()
-            print(f"Indexes built and cached successfully. ({end_time - start_time:.3f} seconds)")
-            
-            return True
-        except Exception as e:
-            print(f"Error loading GEDCOM file: {e}")
-            return False
-    
+                    print(f"Please enter a number between 1 and {len(ged_files)}.")
+            except ValueError:
+                print("Please enter a valid number or press Enter for default.")
+        
+        # Return relative path from base directory
+        relative_path = selected_file.relative_to(self._base_dir)
+        print(f"\nSelected: {selected_file.name}")
+        return str(relative_path)
+
     def _build_indexes(self):
         """Build relationship indexes for fast lookups."""
         if not self.is_loaded:
@@ -1169,13 +1223,28 @@ class Ged4PyGedcomDB(GedcomDB):
 
     # ============ CACHING METHODS ============
     
+    def _get_cache_file_base(self) -> str:
+        """Get a unique cache file base name for the current GEDCOM file."""
+        import hashlib
+        # Create a hash of the relative file path for unique cache names
+        path_hash = hashlib.md5(self.file_path.encode()).hexdigest()[:8]
+        # Also include the filename (without extension) for readability
+        file_stem = Path(self.file_path).stem
+
+        return f"{file_stem}_{path_hash}"
+
     def _should_use_cache(self) -> bool:
         """Determine if we can use cached indexes."""
         try:
-            if not self._metadata_file.exists():
+            cache_base = self._get_cache_file_base()
+            metadata_file = self._cache_dir / f'{cache_base}_metadata.json'
+            
+            if not metadata_file.exists():
                 return False
                 
-            metadata = self._load_metadata()
+            with open(metadata_file, 'r') as f:
+                metadata = json.load(f)
+                
             if not metadata:
                 return False
             
@@ -1199,7 +1268,12 @@ class Ged4PyGedcomDB(GedcomDB):
                 
             # Check all index files exist
             return self._validate_index_files(metadata)
-        except Exception:
+        except (FileNotFoundError, json.JSONDecodeError, KeyError) as e:
+            # Expected exceptions when cache is invalid
+            return False
+        except Exception as e:
+            # Unexpected exceptions should be logged, not hidden
+            print(f"Unexpected error in cache validation: {e}")
             return False
     
     def _get_gedcom_stats(self) -> Optional[dict]:
@@ -1207,6 +1281,7 @@ class Ged4PyGedcomDB(GedcomDB):
         try:
             gedcom_path = self._base_dir / self.file_path
             if not gedcom_path.exists():
+                print(f"Warning: GEDCOM file not found at {gedcom_path}")
                 return None
                 
             stat = gedcom_path.stat()
@@ -1215,9 +1290,233 @@ class Ged4PyGedcomDB(GedcomDB):
                 'gedcom_size': stat.st_size,
                 'gedcom_modified': stat.st_mtime
             }
-        except Exception:
+        except Exception as e:
+            print(f"Error getting GEDCOM stats: {e}")
             return None
-    
+
+    def show_gedcom_summary(self):
+        """Display a summary of the loaded GEDCOM file."""
+        if not self.is_loaded:
+            print("No GEDCOM file loaded.")
+            return
+        
+        print("\n" + "="*60)
+        print("GEDCOM FILE SUMMARY")
+        print("="*60)
+        
+        # Basic file info
+        file_path = self._base_dir / self.file_path
+        file_size_mb = file_path.stat().st_size / (1024 * 1024)
+        file_name = file_path.name
+        
+        print(f"File: {file_name}")
+        print(f"Size: {file_size_mb:.1f} MB")
+        print(f"Path: {self.file_path}")
+        
+        # Record counts
+        if self._indexes_built:
+            # Use cached counts for speed
+            individual_count = len(self._individual_index)
+            family_count = len(self._family_index) 
+            source_count = len(self._source_index)
+        else:
+            # Count from file
+            individual_count = family_count = source_count = 0
+            full_path = self._base_dir / self.file_path
+            with GedcomReader(str(full_path)) as parser:
+                for _ in parser.records0('INDI'):
+                    individual_count += 1
+                for _ in parser.records0('FAM'):
+                    family_count += 1
+                for _ in parser.records0('SOUR'):
+                    source_count += 1
+        
+        print(f"\nRecord Counts:")
+        print(f"  Individuals: {individual_count:,}")
+        print(f"  Families: {family_count:,}")
+        print(f"  Sources: {source_count:,}")
+        
+        # Date range analysis
+        birth_years = []
+        death_years = []
+        
+        if self._indexes_built:
+            # Use indexed data
+            for individual in self._individual_index.values():
+                if individual.birth_year:
+                    birth_years.append(individual.birth_year)
+                if individual.death_year:
+                    death_years.append(individual.death_year)
+        else:
+            # Scan file
+            full_path = self._base_dir / self.file_path
+            with GedcomReader(str(full_path)) as parser:
+                for indi in parser.records0('INDI'):
+                    indi_wrapper = Ged4PyIndividual(indi.xref_id, indi, self)
+                    if indi_wrapper.birth_year:
+                        birth_years.append(indi_wrapper.birth_year)
+                    if indi_wrapper.death_year:
+                        death_years.append(indi_wrapper.death_year)
+        
+        if birth_years or death_years:
+            print(f"\nDate Ranges:")
+            if birth_years:
+                print(f"  Birth years: {min(birth_years)} - {max(birth_years)} ({len(birth_years)} records)")
+            if death_years:
+                print(f"  Death years: {min(death_years)} - {max(death_years)} ({len(death_years)} records)")
+        
+        # Ancestor filter status
+        if hasattr(self, 'ancestor_filter_ids') and self.ancestor_filter_ids:
+            filter_count = len(self.ancestor_filter_ids)
+            root_name = getattr(self, 'root_ancestor_name', 'Unknown')
+            print(f"\nTree Scope: Limited to {filter_count:,} individuals")
+            print(f"Root Ancestor: {root_name}")
+        else:
+            print(f"\nTree Scope: Full database (no ancestor filter)")
+        
+        print("="*60)
+
+    def load_file(self, file_path: str = None) -> bool:
+        """Load GEDCOM file using ged4py with intelligent caching and file selection."""
+        if GedcomReader is None:
+            print("Error: ged4py library not available")
+            return False
+        
+        try:
+            # If no file path provided, show file selection menu
+            if file_path is None:
+                file_path = self._select_gedcom_file()
+                if not file_path:
+                    print("No file selected.")
+                    return False
+            else:
+                # If a file path was provided, check if it's just a filename and look in ged folder
+                file_path_obj = Path(file_path)
+                if not file_path_obj.is_absolute() and not file_path_obj.exists():
+                    # Try looking in the ged subfolder
+                    ged_path = self._base_dir / 'ged' / file_path
+                    if ged_path.exists():
+                        file_path = str(ged_path.relative_to(self._base_dir))
+            
+            # Store the relative path from base directory
+            if Path(file_path).is_absolute():
+                self.file_path = str(Path(file_path).relative_to(self._base_dir))
+            else:
+                self.file_path = file_path
+            
+            # Clear all existing indexes and state when loading new file - DO THIS AFTER SETTING file_path
+            self._individual_index = {}
+            self._family_index = {}
+            self._source_index = {}
+            self._parent_index = {}
+            self._child_index = {}
+            self._spouse_index = {}
+            self._family_members = {}
+            self._indexes_built = False
+            
+            # Reset ancestor filter when loading new file
+            if hasattr(self, 'ancestor_filter_ids'):
+                self.ancestor_filter_ids = None
+            if hasattr(self, 'root_ancestor_name'):
+                self.root_ancestor_name = None
+            
+            # Test that we can open the file
+            full_path = self._base_dir / self.file_path
+            if not full_path.exists():
+                print(f"Error: File not found: {full_path}")
+                print("Available files in ged folder:")
+                ged_folder = self._base_dir / 'ged'
+                if ged_folder.exists():
+                    for ged_file in ged_folder.glob('*.ged'):
+                        print(f"  {ged_file.name}")
+                return False
+            
+            # Test that we can parse the file
+            try:
+                with GedcomReader(str(full_path)) as parser:
+                    # Test parsing by reading first record
+                    for record in parser.records0('INDI'):
+                        break  # Just test we can read at least one record
+            except Exception as parse_error:
+                print(f"\nError: GEDCOM file has parsing errors:")
+                print(f"  {parse_error}")
+                print(f"\nThis file appears to be corrupted or contains invalid GEDCOM syntax.")
+                print(f"File: {full_path}")
+                
+                # Offer options to user
+                while True:
+                    print("\nOptions:")
+                    print("1. Try a different file")
+                    print("2. Exit program")
+                    choice = input("Choose option (1-2): ").strip()
+                    
+                    if choice == '1':
+                        # Try to select a different file
+                        new_file_path = self._select_gedcom_file()
+                        if new_file_path:
+                            return self.load_file(new_file_path)  # Recursive call with new file
+                        else:
+                            return False
+                    elif choice == '2':
+                        return False
+                    else:
+                        print("Please enter 1 or 2.")
+            
+            self.is_loaded = True
+            
+            # Try to use cached indexes first
+            if self._should_use_cache():
+                start_time = time.time()
+                print("Loading cached indexes...")
+                if self._load_indexes_from_cache():
+                    end_time = time.time()
+                    print(f"Cached indexes loaded successfully. ({end_time - start_time:.3f} seconds)")
+                    self.show_gedcom_summary()  # Show summary after successful load
+                    return True
+                else:
+                    print("Failed to load cached indexes, rebuilding...")
+            
+            # Build indexes from scratch
+            start_time = time.time()
+            print("Building relationship indexes for fast lookups...")
+            
+            try:
+                self._build_indexes()
+            except Exception as index_error:
+                print(f"\nError building indexes: {index_error}")
+                print("This usually indicates corrupted GEDCOM data.")
+                
+                while True:
+                    print("\nOptions:")
+                    print("1. Try a different file")
+                    print("2. Exit program")
+                    choice = input("Choose option (1-2): ").strip()
+                    
+                    if choice == '1':
+                        new_file_path = self._select_gedcom_file()
+                        if new_file_path:
+                            return self.load_file(new_file_path)
+                        else:
+                            return False
+                    elif choice == '2':
+                        return False
+                    else:
+                        print("Please enter 1 or 2.")
+            
+            # Cache the indexes for next time
+            self._save_indexes_to_cache()
+            end_time = time.time()
+            print(f"Indexes built and cached successfully. ({end_time - start_time:.3f} seconds)")
+            
+            # Show summary after successful load
+            self.show_gedcom_summary()
+            
+            return True
+        except Exception as e:
+            print(f"Unexpected error loading GEDCOM file: {e}")
+            print("This may indicate a serious file corruption or system issue.")
+            return False
+
     def _load_metadata(self) -> Optional[dict]:
         """Load cache metadata from file."""
         try:
@@ -1241,17 +1540,19 @@ class Ged4PyGedcomDB(GedcomDB):
     def _load_indexes_from_cache(self) -> bool:
         """Load relationship indexes from cache files."""
         try:
+            cache_base = self._get_cache_file_base()
+            
             # Load relationship indexes only
-            with open(self._indexes_dir / 'parent_index.pkl', 'rb') as f:
+            with open(self._indexes_dir / f'{cache_base}_parent_index.pkl', 'rb') as f:
                 self._parent_index = pickle.load(f)
             
-            with open(self._indexes_dir / 'child_index.pkl', 'rb') as f:
+            with open(self._indexes_dir / f'{cache_base}_child_index.pkl', 'rb') as f:
                 self._child_index = pickle.load(f)
             
-            with open(self._indexes_dir / 'spouse_index.pkl', 'rb') as f:
+            with open(self._indexes_dir / f'{cache_base}_spouse_index.pkl', 'rb') as f:
                 self._spouse_index = pickle.load(f)
             
-            with open(self._indexes_dir / 'family_members.pkl', 'rb') as f:
+            with open(self._indexes_dir / f'{cache_base}_family_members.pkl', 'rb') as f:
                 self._family_members = pickle.load(f)
             
             # Rebuild individual, family, and source indexes from GEDCOM file
@@ -1283,41 +1584,46 @@ class Ged4PyGedcomDB(GedcomDB):
             self._cache_dir.mkdir(exist_ok=True)
             self._indexes_dir.mkdir(exist_ok=True)
             
+            cache_base = self._get_cache_file_base()
+            
             # Save only the relationship mappings (sets of IDs), not the full objects
-            with open(self._indexes_dir / 'parent_index.pkl', 'wb') as f:
+            with open(self._indexes_dir / f'{cache_base}_parent_index.pkl', 'wb') as f:
                 pickle.dump(self._parent_index, f)
             
-            with open(self._indexes_dir / 'child_index.pkl', 'wb') as f:
+            with open(self._indexes_dir / f'{cache_base}_child_index.pkl', 'wb') as f:
                 pickle.dump(self._child_index, f)
             
-            with open(self._indexes_dir / 'spouse_index.pkl', 'wb') as f:
+            with open(self._indexes_dir / f'{cache_base}_spouse_index.pkl', 'wb') as f:
                 pickle.dump(self._spouse_index, f)
             
-            with open(self._indexes_dir / 'family_members.pkl', 'wb') as f:
+            with open(self._indexes_dir / f'{cache_base}_family_members.pkl', 'wb') as f:
                 pickle.dump(self._family_members, f)
             
-            # Save metadata
+            # Save metadata with updated index names
             current_stats = self._get_gedcom_stats()
             if current_stats:
                 metadata = {
                     **current_stats,
                     'indexes_created': datetime.now().timestamp(),
                     'cache_version': self._cache_version,
+                    'cache_base': cache_base,
                     'available_indexes': [
-                        'parent_index',
-                        'child_index',
-                        'spouse_index',
-                        'family_members'
+                        f'{cache_base}_parent_index',
+                        f'{cache_base}_child_index', 
+                        f'{cache_base}_spouse_index',
+                        f'{cache_base}_family_members'
                     ]
                 }
                 
-                with open(self._metadata_file, 'w') as f:
+                # Use file-specific metadata filename
+                metadata_file = self._cache_dir / f'{cache_base}_metadata.json'
+                with open(metadata_file, 'w') as f:
                     json.dump(metadata, f, indent=2)
                     
         except Exception as e:
-            print(f"Warning: Could not save indexes to cache: {e}")
-            import traceback
-            traceback.print_exc()
+            print(f"Error saving indexes to cache: {e}")
+            # Don't fail the entire load operation if caching fails
+            pass
     
     def clear_cache(self):
         """Manually clear the relationship index cache."""
@@ -1428,7 +1734,7 @@ class Ged4PyGedcomDB(GedcomDB):
                                 if "census" in title:
                                     print(f"\n  Census record for source {source_id}:")
                                     print_all_fields(source_record, indent="    ")
-            
+
             count += 1
 
             #cont = input("Continue to next person? (y/n): ").strip().lower()
@@ -1446,6 +1752,12 @@ class Ged4PyGedcomDB(GedcomDB):
         print("\n=== Dumping all wedding (marriage) records for all families and individuals ===\n")
         family_marriages = []
         individual_marriages = []
+
+        # Determine which individuals to process
+        if hasattr(self, "ancestor_filter_ids") and self.ancestor_filter_ids:
+            individuals = [self._individual_index[xref_id] for xref_id in self.ancestor_filter_ids if xref_id in self._individual_index]
+        else:
+            individuals = list(self._individual_index.values())
 
         # 1. Collect family marriage records
         for fam in self._family_index.values():
@@ -1484,8 +1796,9 @@ class Ged4PyGedcomDB(GedcomDB):
                     })
 
         # 2. Collect individual marriage records
-        for ind in self._individual_index.values():
+        for ind in individuals:
             name = getattr(ind, "name", None) or ind.xref_id
+            print(f"name = {name}")
             for sub in getattr(ind.raw_record, "sub_records", []):
                 if getattr(sub, "tag", None) in ("MARR", "MARRIAGE", "WEDDING"):
                     # Try to get marriage date
@@ -1506,20 +1819,24 @@ class Ged4PyGedcomDB(GedcomDB):
         print("=== Family Marriage Records ===")
         family_count = 0
         for fam in family_marriages:
+            if fam['husband_name'] not in individuals["name"]:
+                print("skipping family")
+                continue
+
             print(f"\nFamily: {fam['fam_id']}")
             print(f"  Husband: {fam['husband_name']}")
             print(f"  Wife: {fam['wife_name']}")
             print(f"  {fam['record'].tag}: {getattr(fam['record'], 'value', None)}")
             print(f"  Marriage Date: {fam['marriage_date']}")
             # Print all subfields recursively
-            def print_subfields(rec, indent="    "):
-                for field in getattr(rec, "sub_records", []):
-                    tag = getattr(field, "tag", None)
-                    value = getattr(field, "value", None)
-                    print(f"{indent}{tag}: {value}")
-                    if hasattr(field, "sub_records") and field.sub_records:
-                        print_subfields(field, indent + "    ")
-            print_subfields(fam['record'])
+            #def print_subfields(rec, indent="    "):
+            #    for field in getattr(rec, "sub_records", []):
+            #        tag = getattr(field, "tag", None)
+            #        value = getattr(field, "value", None)
+            #        print(f"{indent}{tag}: {value}")
+            #        if hasattr(field, "sub_records") and field.sub_records:
+            #            print_subfields(field, indent + "    ")
+            #print_subfields(fam['record'])
 
             # Print all info from the wedding source document(s)
             for sub in getattr(fam['record'], "sub_records", []):
@@ -1527,12 +1844,12 @@ class Ged4PyGedcomDB(GedcomDB):
                     source_id = str(sub.value).strip()
                     source_record = self._source_index.get(source_id)
                     if source_record:
-                        print(f"    --- Wedding Source Document ({source_id}) ---")
+                        #print(f"    --- Wedding Source Document ({source_id}) ---")
                         def print_source_fields(record, indent="      "):
                             for field in getattr(record, "sub_records", []):
                                 tag = getattr(field, "tag", None)
                                 value = getattr(field, "value", None)
-                                print(f"{indent}{tag}: {value}")
+                                #print(f"{indent}{tag}: {value}")
                                 if hasattr(field, "sub_records") and field.sub_records:
                                     print_source_fields(field, indent + "    ")
                         print_source_fields(source_record)
@@ -1783,3 +2100,152 @@ class Ged4PyGedcomDB(GedcomDB):
                     age = marriage_year - wife_birth
                     print(f"  {names.get(wife_id, wife_id)}: Age {age} in {marriage_year} (Family {fam.xref_id})")
 
+    def analyse_years_lived(self):
+        """
+        Analyze ages at death for men and women.
+        Prints overall, decade, and century stats with average/max for male and female.
+        Excludes ages >= 100, negative ages, and those with no death recorded.
+        Optionally excludes deaths under age 5.
+        """
+        print("\n=== Death Age Analysis ===\n")
+        
+        # Ask about excluding deaths under age 5
+        exclude_under_5 = input("Exclude people who died under age 5? (Y/n): ").strip().lower()
+        exclude_under_5 = exclude_under_5 != 'n'  # Default is yes
+        
+        # Use ancestor filter if present
+        if hasattr(self, "ancestor_filter_ids") and self.ancestor_filter_ids:
+            individuals = [self._individual_index[xref_id] for xref_id in self.ancestor_filter_ids if xref_id in self._individual_index]
+            tree_context = f"current ancestry tree ({len(self.ancestor_filter_ids)} individuals)"
+        else:
+            individuals = list(self._individual_index.values())
+            tree_context = f"entire database ({len(individuals)} individuals)"
+
+        # Build lookup for birth years, death years, and names
+        birth_years = {ind.xref_id: ind.birth_year for ind in individuals if ind.birth_year}
+        death_years = {ind.xref_id: ind.death_year for ind in individuals if ind.death_year}
+        names = {ind.xref_id: ind.name for ind in individuals}
+
+        # Collect ages by decade and century
+        decade_data = {}
+        century_data = {}
+        male_ages = []
+        female_ages = []
+
+        print(f"Analyzing {tree_context}...")
+
+        for ind in individuals:
+            # Skip if no birth or death year
+            birth_year = birth_years.get(ind.xref_id)
+            death_year = death_years.get(ind.xref_id)
+            
+            if not birth_year or not ind.is_deceased() or not death_year:
+                continue
+                
+            # Calculate age at death
+            age = death_year - birth_year
+            
+            # Skip negative ages
+            if age < 0:
+                continue
+                
+            # Skip ages over 100
+            if age >= 100:
+                continue
+                
+            # Skip deaths under age 5 if requested
+            if exclude_under_5 and age < 5:
+                continue
+
+            # Get gender from raw record
+            gender = None
+            if hasattr(ind, 'raw_record') and ind.raw_record and hasattr(ind.raw_record, 'sub_records'):
+                for sub in ind.raw_record.sub_records:
+                    if getattr(sub, 'tag', None) == 'SEX':
+                        gender = (sub.value or '').strip().upper()
+                        break
+
+            # Skip if no gender specified
+            if not gender or gender not in ['M', 'F']:
+                continue
+
+            decade = (death_year // 10) * 10
+            century = (death_year // 100) * 100
+
+            # Add to appropriate gender list
+            if gender == 'M':
+                male_ages.append(age)
+                decade_data.setdefault(decade, {"male": [], "female": []})["male"].append(age)
+                century_data.setdefault(century, {"male": [], "female": []})["male"].append(age)
+            else:  # gender == 'F'
+                female_ages.append(age)
+                decade_data.setdefault(decade, {"male": [], "female": []})["female"].append(age)
+                century_data.setdefault(century, {"male": [], "female": []})["female"].append(age)
+
+        def avg(lst):
+            return round(sum(lst) / len(lst), 2) if lst else None
+        def maximum(lst):
+            return max(lst) if lst else None
+
+        # Overall stats
+        print(f"Overall average male age at death: {avg(male_ages)} ({len(male_ages)} records)")
+        print(f"Overall average female age at death: {avg(female_ages)} ({len(female_ages)} records)")
+        print(f"Overall max male age at death: {maximum(male_ages)}")
+        print(f"Overall max female age at death: {maximum(female_ages)}")
+        
+        exclusions = []
+        if exclude_under_5:
+            exclusions.append("deaths under age 5")
+        exclusions.append("ages >= 115")
+        exclusions.append("negative ages")
+        exclusions.append("missing birth/death years")
+        exclusions.append("missing gender")
+        
+        print(f"(Excluding: {', '.join(exclusions)})\n")
+
+        # Grand total stats across all data
+        male_max = maximum(male_ages)
+        female_max = maximum(female_ages)
+        print("=== Grand Total Death Age Stats ===")
+        print(f"  Male Avg: {avg(male_ages)} (max: {male_max})")
+        print(f"  Female Avg: {avg(female_ages)} (max: {female_max})\n")
+
+        # Per-decade
+        print("=== Per-Decade Death Age Stats ===")
+        grand_total = 0
+        for decade in sorted(decade_data):
+            male_list = decade_data[decade]["male"]
+            female_list = decade_data[decade]["female"]
+            all_ages = male_list + female_list
+            n_records = len(all_ages)
+            grand_total += n_records
+            
+            male_avg = avg(male_list)
+            female_avg = avg(female_list)
+            male_max = maximum(male_list)
+            female_max = maximum(female_list)
+            overall_avg = avg(all_ages)
+            
+            print(f"{decade}s: {overall_avg} avg ({n_records} records)")
+            print(f"    Male Avg: {male_avg} (max: {male_max}) [{len(male_list)} records]")
+            print(f"    Female Avg: {female_avg} (max: {female_max}) [{len(female_list)} records]")
+        print(f"\nGrand total deaths: {grand_total}")
+
+        # Per-century
+        print("\n=== Per-Century Death Age Stats ===")
+        for century in sorted(century_data):
+            male_list = century_data[century]["male"]
+            female_list = century_data[century]["female"]
+            all_ages = male_list + female_list
+            n_records = len(all_ages)
+            
+            male_avg = avg(male_list)
+            female_avg = avg(female_list)
+            male_max = maximum(male_list)
+            female_max = maximum(female_list)
+            overall_avg = avg(all_ages)
+            
+            century_label = f"{century//100+1}th century" if century >= 1000 else f"{century}s"
+            print(f"{century_label}: {overall_avg} avg ({n_records} records)")
+            print(f"    Male Avg: {male_avg} (max: {male_max}) [{len(male_list)} records]")
+            print(f"    Female Avg: {female_avg} (max: {female_max}) [{len(female_list)} records]")
