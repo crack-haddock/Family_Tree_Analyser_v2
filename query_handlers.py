@@ -1163,6 +1163,17 @@ class ValidityQueryHandler:
                 break  # Only return first marriage
         return None
 
+    def check_parents_died_before_children_born(self):
+        """Check for parents who died before their children were born."""
+        # Call the database method
+        print("\n--- Validity Check: Parents Died Before Children Born ---")
+
+        if hasattr(self.database, 'check_parents_died_before_children_born'):
+            self.database.check_parents_died_before_children_born()
+        else:
+            print("This feature is not available for the current database type.")
+            input("\nPress Enter to continue...")
+
     def _get_child_birth_dates(self, individual):
         """Get first and last child birth dates for an individual."""
         child_dates = []

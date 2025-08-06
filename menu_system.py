@@ -139,7 +139,10 @@ class MenuSystem:
                         self.validity_handler.find_individuals_not_in_ancestry_tree, "v", ["read"])
 
         self._add_option("7", "Show individuals who lived past a specific age",
-                self.validity_handler.find_individuals_who_lived_past_age, "v", ["read", "dates"])
+                        self.validity_handler.find_individuals_who_lived_past_age, "v", ["read", "dates"])
+
+        self._add_option("8", "Check parents who died before children were born",
+                        self.validity_handler.check_parents_died_before_children_born, "v", ["read", "dates"])
 
         
         # === SEARCH & NAVIGATION ===
@@ -168,6 +171,8 @@ class MenuSystem:
         self._add_option("4", "Oldest individuals (by birth year)", 
                         self.report_handler.analyse_oldest_individuals, "r", ["read", "dates"])
 
+        self._add_option("5", "Plot birth places on map", self.plot_birth_places_menu, "r", ["read", "places"])
+
         self._add_option("6", "Analyse age ranges", 
                         self.database.analyse_years_lived, "r", ["read", "dates"])
 
@@ -190,6 +195,12 @@ class MenuSystem:
         
         self._add_option("3", "To Do - Import additional data", 
                         self._placeholder_handler, "d", ["read", "write"])
+
+        self._add_option("4", "Clear geocoding cache", 
+                        self.database.clear_geocoding_cache, "d", ["read"])
+
+        self._add_option("5", "Test single address geocoding", 
+                        self.database.test_single_address_mapping, "d", ["read"])
 
     def _add_option(self, key: str, description: str, handler: Callable, 
                    category: str, required_capabilities: List[str]):
@@ -1003,6 +1014,11 @@ class MenuSystem:
             print(f"Birth year constraints: {' and '.join(constraints)}")
         else:
             print("Birth year constraints: None (excluding individuals with no birth year data)")
+
+    def plot_birth_places_menu(self):
+        """Menu for birth place mapping options - delegates to database."""
+        # Simply call the database method
+        self.database.plot_birth_places_menu()
 
     def _placeholder_handler(self):
         """Placeholder handler for menu options - to be replaced with actual implementations."""

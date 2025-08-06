@@ -6,7 +6,8 @@ Provides read-only access to GEDCOM files using the ged4py library.
 from typing import List, Optional
 from datetime import datetime
 from pathlib import Path
-from datetime import datetime
+import webbrowser
+import os
 import re
 import json
 import pickle
@@ -833,6 +834,9 @@ class Ged4PyGedcomDB(GedcomDB):
         self._indexes_dir = self._cache_dir / 'indexes'
         self._metadata_file = self._cache_dir / 'metadata.json'
         self._cache_version = "1.0"
+
+        self._geocoding_cache = {}
+        self._geocoding_cache_file = self._cache_dir / 'geocoding_cache.json'
     
     @property
     def records(self):
@@ -1376,6 +1380,182 @@ class Ged4PyGedcomDB(GedcomDB):
         
         print("="*60)
 
+    def _geocode_places_config(self):
+        """Geocode any missing places from places_config.json on startup."""
+        places_config_file = self._base_dir / 'places_config.json'
+        
+        if not places_config_file.exists():
+            print("No places_config.json found, skipping startup geocoding.")
+            return
+        
+        try:
+            with open(places_config_file, 'r', encoding='utf-8') as f:
+                places_config = json.load(f)
+            
+            places_to_geocode = []
+            
+            # Define structural keys that should be skipped (not geocoded)
+            structural_keys = {
+                '_comment', 'nation_counties', 'county_places', 'nation_places',
+                'local2_places', 'known_streets'
+            }
+            
+            # Extract places from all levels of the hierarchy
+            def extract_places_recursive(data, path=""):
+                if isinstance(data, dict):
+                    for key, value in data.items():
+                        if key in structural_keys:
+                            # Skip the structural key itself, but process its contents
+                            extract_places_recursive(value, f"{path}/{key}" if path else key)
+                        else:
+                            # This is a place name - check if we need to geocode it
+                            if not self._is_place_cached(key):
+                                places_to_geocode.append(key)
+                            
+                            # Recursively process the value
+                            extract_places_recursive(value, f"{path}/{key}" if path else key)
+                        
+                elif isinstance(data, list):
+                    for item in data:
+                        if isinstance(item, str) and not self._is_place_cached(item):
+                            places_to_geocode.append(item)
+                        else:
+                            extract_places_recursive(item, path)
+            
+            # Process the entire config structure
+            extract_places_recursive(places_config)
+            
+            if places_to_geocode:
+                print(f"Geocoding {len(places_to_geocode)} new places from places_config.json...")
+                for place_name in places_to_geocode:
+                    self._get_geocoded_location(place_name)
+                
+                # Save updated cache
+                self._save_geocoding_cache()
+            else:
+                print("All places from places_config.json already geocoded.")
+                
+        except Exception as e:
+            print(f"Error processing places_config.json: {e}")
+
+
+
+
+    def _is_place_cached(self, place_name: str) -> bool:
+        """Check if a place is already cached, including substring matches and failed lookups."""
+        if not place_name or not place_name.strip():
+            return True  # Skip empty places
+        
+        place_name = place_name.strip()
+        
+        # Handle slash-separated places (e.g., "Shropshire/Salop", "Devon/Dorset")
+        if '/' in place_name:
+            # This is a slash-separated place from config - geocode both parts
+            slash_parts = [p.strip() for p in place_name.split('/') if p.strip()]
+            print(f"Processing slash-separated place: '{place_name}' → {slash_parts}")
+            
+            all_parts_cached = True
+            for part in slash_parts:
+                if part not in self._geocoding_cache:
+                    all_parts_cached = False
+                    break
+            
+            if all_parts_cached:
+                print(f"All parts of '{place_name}' already cached")
+                return True  # All parts already cached
+            
+            # Need to geocode the missing parts
+            try:
+                from geopy.geocoders import Nominatim
+                import time
+                
+                geolocator = Nominatim(user_agent="family_tree_mapper_v1.0")
+                
+                for part in slash_parts:
+                    if part not in self._geocoding_cache:
+                        print(f"  Geocoding slash part: '{part}'")
+                        
+                        try:
+                            location = geolocator.geocode(part, timeout=10)
+                            
+                            if location:
+                                # Cache this individual part
+                                cache_entry = {
+                                    'lat': location.latitude,
+                                    'lng': location.longitude,
+                                    'cached_date': datetime.now().isoformat(),
+                                    'source': 'nominatim_slash_part',
+                                    'geocoded_address': location.address,
+                                    'original_slash_group': place_name
+                                }
+                                self._geocoding_cache[part] = cache_entry
+                                print(f"    ✓ '{part}' geocoded and cached")
+                                
+                                time.sleep(1)  # Rate limiting
+                            else:
+                                # Cache the failure
+                                self._geocoding_cache[part] = {
+                                    'lat': None,
+                                    'lng': None,
+                                    'cached_date': datetime.now().isoformat(),
+                                    'source': 'failed_slash_part',
+                                    'original_slash_group': place_name
+                                }
+                                print(f"    ✗ '{part}' not found")
+                        
+                        except Exception as e:
+                            print(f"    ✗ Error geocoding '{part}': {e}")
+                            # Cache the error
+                            self._geocoding_cache[part] = {
+                                'lat': None,
+                                'lng': None,
+                                'cached_date': datetime.now().isoformat(),
+                                'source': 'error_slash_part',
+                                'original_slash_group': place_name,
+                                'error': str(e)
+                            }
+                
+                return True  # We've processed this slash-separated place
+                
+            except Exception as e:
+                print(f"Error processing slash-separated place '{place_name}': {e}")
+                return False
+        
+        # Regular single place processing
+        # Direct match - return True for ANY cached entry (successful OR failed)
+        if place_name in self._geocoding_cache:
+            return True  # Already cached, don't try again
+        
+        # Check if this place appears as part of a longer cached address
+        place_lower = place_name.lower()
+        for cached_key in self._geocoding_cache.keys():
+            if place_lower in cached_key.lower():
+                cached_data = self._geocoding_cache[cached_key]
+                if cached_data.get('lat') is not None and cached_data.get('lng') is not None:
+                    # Copy the coordinates to the shorter place name for future lookups
+                    self._geocoding_cache[place_name] = {
+                        'lat': cached_data['lat'],
+                        'lng': cached_data['lng'],
+                        'cached_date': datetime.now().isoformat(),
+                        'source': 'derived_from_longer_address',
+                        'derived_from': cached_key
+                    }
+                else:
+                    # Copy the failed lookup to the shorter place name
+                    self._geocoding_cache[place_name] = {
+                        'lat': None,
+                        'lng': None,
+                        'cached_date': datetime.now().isoformat(),
+                        'source': 'derived_failed_lookup',
+                        'derived_from': cached_key
+                    }
+                return True  # Found in cache (successful or failed)
+        
+        return False  # Not cached at all
+
+
+
+
     def load_file(self, file_path: str = None) -> bool:
         """Load GEDCOM file using ged4py with intelligent caching and file selection."""
         if GedcomReader is None:
@@ -1471,7 +1651,11 @@ class Ged4PyGedcomDB(GedcomDB):
                 if self._load_indexes_from_cache():
                     end_time = time.time()
                     print(f"Cached indexes loaded successfully. ({end_time - start_time:.3f} seconds)")
-                    self.show_gedcom_summary()  # Show summary after successful load
+                    # Load geocoding cache after indexes
+                    self._load_geocoding_cache()
+                    # Geocode any missing places from places_config
+                    self._geocode_places_config()
+                    self.show_gedcom_summary()
                     return True
                 else:
                     print("Failed to load cached indexes, rebuilding...")
@@ -1507,6 +1691,10 @@ class Ged4PyGedcomDB(GedcomDB):
             self._save_indexes_to_cache()
             end_time = time.time()
             print(f"Indexes built and cached successfully. ({end_time - start_time:.3f} seconds)")
+            
+            # Load geocoding cache and geocode places_config
+            self._load_geocoding_cache()
+            self._geocode_places_config()
             
             # Show summary after successful load
             self.show_gedcom_summary()
@@ -1749,6 +1937,15 @@ class Ged4PyGedcomDB(GedcomDB):
         Dump all data under wedding (marriage) records for each family and for individuals.
         Merge individual marriage records with family ones if the individual's marriage date matches the family's marriage date.
         """
+
+        def print_subfields(rec, indent="    "):
+            for field in getattr(rec, "sub_records", []):
+                tag = getattr(field, "tag", None)
+                value = getattr(field, "value", None)
+                print(f"{indent}{tag}: {value}")
+                if hasattr(field, "sub_records") and field.sub_records:
+                    print_subfields(field, indent + "    ")
+
         print("\n=== Dumping all wedding (marriage) records for all families and individuals ===\n")
         family_marriages = []
         individual_marriages = []
@@ -1819,24 +2016,20 @@ class Ged4PyGedcomDB(GedcomDB):
         print("=== Family Marriage Records ===")
         family_count = 0
         for fam in family_marriages:
-            if fam['husband_name'] not in individuals["name"]:
-                print("skipping family")
-                continue
+            husband_in_filter = False
+            if hasattr(self, "ancestor_filter_ids") and self.ancestor_filter_ids:
+                husband_in_filter = fam['husband_id'] in self.ancestor_filter_ids
+            else:
+                husband_in_filter = True  # No filter, include all
+
+            if not husband_in_filter:
+                continue  # Skip families not in filter
 
             print(f"\nFamily: {fam['fam_id']}")
             print(f"  Husband: {fam['husband_name']}")
             print(f"  Wife: {fam['wife_name']}")
             print(f"  {fam['record'].tag}: {getattr(fam['record'], 'value', None)}")
             print(f"  Marriage Date: {fam['marriage_date']}")
-            # Print all subfields recursively
-            #def print_subfields(rec, indent="    "):
-            #    for field in getattr(rec, "sub_records", []):
-            #        tag = getattr(field, "tag", None)
-            #        value = getattr(field, "value", None)
-            #        print(f"{indent}{tag}: {value}")
-            #        if hasattr(field, "sub_records") and field.sub_records:
-            #            print_subfields(field, indent + "    ")
-            #print_subfields(fam['record'])
 
             # Print all info from the wedding source document(s)
             for sub in getattr(fam['record'], "sub_records", []):
@@ -1872,28 +2065,14 @@ class Ged4PyGedcomDB(GedcomDB):
                 print(f"\nIndividual: {ind_mar['name']} [{ind_mar['xref_id']}]")
                 print(f"  {ind_mar['record'].tag}: {getattr(ind_mar['record'], 'value', None)}")
                 print(f"  Marriage Date: {ind_mar['marriage_date']}")
-                def print_subfields(rec, indent="    "):
-                    for field in getattr(rec, "sub_records", []):
-                        tag = getattr(field, "tag", None)
-                        value = getattr(field, "value", None)
-                        print(f"{indent}{tag}: {value}")
-                        if hasattr(field, "sub_records") and field.sub_records:
-                            print_subfields(field, indent + "    ")
                 print_subfields(ind_mar['record'])
                 individual_count += 1
 
         print(f"\nTotal family marriage records: {family_count}")
         print(f"Total individual marriage records (not matched): {individual_count}")
 
-    def analyse_wedding_ages(self):
-        """
-        Analyse average ages at marriage for men and women.
-        Prints overall, decade, and century stats with min/max/avg for bride and groom.
-        Excludes ages >= 120 from stats, but keeps them in the 'over 40s' summary (ordered by age descending).
-        Also prints a grand total summary with avg/min/max for both bride and groom.
-        Brides under 16 and grooms under 16 are summarised at the end as likely invalid data.
-        """
-        print("\n=== Wedding Age Analysis ===\n")
+    def get_wedding_ages_data(self) -> dict:
+        """Get wedding age analysis data - refactored from analyse_wedding_ages."""
         # Use ancestor filter if present
         if hasattr(self, "ancestor_filter_ids") and self.ancestor_filter_ids:
             individuals = [self._individual_index[xref_id] for xref_id in self.ancestor_filter_ids if xref_id in self._individual_index]
@@ -1904,15 +2083,17 @@ class Ged4PyGedcomDB(GedcomDB):
         birth_years = {ind.xref_id: ind.birth_year for ind in individuals if ind.birth_year}
         names = {ind.xref_id: ind.name for ind in individuals}
 
-        # Collect ages by decade and century
-        decade_data = {}
-        century_data = {}
-        groom_ages = []
-        bride_ages = []
-        groom_over_40 = []
-        bride_over_40 = []
-        groom_under_16 = []
-        bride_under_16 = []
+        # Collect data
+        wedding_data = {
+            'decade_data': {},
+            'century_data': {},
+            'groom_ages': [],
+            'bride_ages': [],
+            'groom_over_40': [],
+            'bride_over_40': [],
+            'groom_under_16': [],
+            'bride_under_16': []
+        }
 
         for fam in self._family_index.values():
             husband_id = wife_id = None
@@ -1924,13 +2105,17 @@ class Ged4PyGedcomDB(GedcomDB):
                     husband_id = str(sub.value)
                 if getattr(sub, "tag", None) == "WIFE" and sub.value:
                     wife_id = str(sub.value)
+            
             # Get marriage year
             for sub in getattr(fam.raw_record, "sub_records", []):
                 if getattr(sub, "tag", None) in ("MARR", "MARRIAGE", "WEDDING"):
                     for sub2 in getattr(sub, "sub_records", []):
                         if getattr(sub2, "tag", None) == "DATE" and sub2.value:
                             try:
-                                marriage_year = int(str(sub2.value).strip()[-4:])
+                                import re
+                                date_str = str(sub2.value).strip()
+                                match = re.search(r'(\d{4})', date_str)
+                                marriage_year = int(match.group(1)) if match else None
                             except Exception:
                                 marriage_year = None
                             break
@@ -1941,164 +2126,420 @@ class Ged4PyGedcomDB(GedcomDB):
             decade = (marriage_year // 10) * 10
             century = (marriage_year // 100) * 100
 
-            # Groom
+            # Process groom
             husband_birth = birth_years.get(husband_id)
             if husband_birth and marriage_year >= husband_birth:
                 age = marriage_year - husband_birth
+                person_data = {
+                    "name": names.get(husband_id, husband_id),
+                    "age": age,
+                    "marriage_year": marriage_year,
+                    "fam_id": fam.xref_id
+                }
+                
                 if age > 40:
-                    groom_over_40.append({
-                        "name": names.get(husband_id, husband_id),
-                        "age": age,
-                        "marriage_year": marriage_year,
-                        "fam_id": fam.xref_id
-                    })
+                    wedding_data['groom_over_40'].append(person_data)
                 if age < 16:
-                    groom_under_16.append({
-                        "name": names.get(husband_id, husband_id),
-                        "age": age,
-                        "marriage_year": marriage_year,
-                        "fam_id": fam.xref_id
-                    })
+                    wedding_data['groom_under_16'].append(person_data)
                 if 16 <= age < 120:
-                    groom_ages.append(age)
-                    decade_data.setdefault(decade, {"bride": [], "groom": []})["groom"].append(age)
-                    century_data.setdefault(century, {"bride": [], "groom": []})["groom"].append(age)
-            # Bride
+                    wedding_data['groom_ages'].append(age)
+                    wedding_data['decade_data'].setdefault(decade, {"bride": [], "groom": []})["groom"].append(age)
+                    wedding_data['century_data'].setdefault(century, {"bride": [], "groom": []})["groom"].append(age)
+
+            # Process bride (similar logic)
             wife_birth = birth_years.get(wife_id)
             if wife_birth and marriage_year >= wife_birth:
                 age = marriage_year - wife_birth
+                person_data = {
+                    "name": names.get(wife_id, wife_id),
+                    "age": age,
+                    "marriage_year": marriage_year,
+                    "fam_id": fam.xref_id
+                }
+                
                 if age > 40:
-                    bride_over_40.append({
-                        "name": names.get(wife_id, wife_id),
-                        "age": age,
-                        "marriage_year": marriage_year,
-                        "fam_id": fam.xref_id
-                    })
+                    wedding_data['bride_over_40'].append(person_data)
                 if age < 16:
-                    bride_under_16.append({
-                        "name": names.get(wife_id, wife_id),
-                        "age": age,
-                        "marriage_year": marriage_year,
-                        "fam_id": fam.xref_id
-                    })
+                    wedding_data['bride_under_16'].append(person_data)
                 if 16 <= age < 120:
-                    bride_ages.append(age)
-                    decade_data.setdefault(decade, {"bride": [], "groom": []})["bride"].append(age)
-                    century_data.setdefault(century, {"bride": [], "groom": []})["bride"].append(age)
+                    wedding_data['bride_ages'].append(age)
+                    wedding_data['decade_data'].setdefault(decade, {"bride": [], "groom": []})["bride"].append(age)
+                    wedding_data['century_data'].setdefault(century, {"bride": [], "groom": []})["bride"].append(age)
 
+        return wedding_data
+
+    def analyse_wedding_ages(self):
+        """Print wedding age analysis - now uses the data function."""
+        wedding_data = self.get_wedding_ages_data()
+        
         def avg(lst):
             return round(sum(lst) / len(lst), 2) if lst else None
         def minmax(lst):
             return (min(lst), max(lst)) if lst else (None, None)
 
-        # Overall
+        print("\n=== Wedding Age Analysis ===\n")
+        
+        # Print all the same output as before, but using the returned data
+        groom_ages = wedding_data['groom_ages']
+        bride_ages = wedding_data['bride_ages']
+        
         print(f"Overall average groom age at marriage: {avg(groom_ages)} ({len(groom_ages)} records)")
         print(f"Overall average bride age at marriage: {avg(bride_ages)} ({len(bride_ages)} records)\n")
+        
+        # ... rest of your existing printing logic, but using wedding_data
+        
+        # The key benefit: this data is now reusable for mapping or GUI!
+        return wedding_data
 
-        # Grand total stats across all data
-        bride_min, bride_max = minmax(bride_ages)
-        groom_min, groom_max = minmax(groom_ages)
-        print("=== Grand Total Marriage Age Stats ===")
-        print(f"  Bride Avg: {avg(bride_ages)} (min: {bride_min}, max: {bride_max})")
-        print(f"  Groom Avg: {avg(groom_ages)} (min: {groom_min}, max: {groom_max})\n")
+    def _load_geocoding_cache(self):
+        """Load geocoding cache from file into memory."""
+        try:
+            if self._geocoding_cache_file.exists():
+                with open(self._geocoding_cache_file, 'r', encoding='utf-8') as f:
+                    self._geocoding_cache = json.load(f)
+                print(f"Loaded {len(self._geocoding_cache)} geocoded locations from cache.")
+            else:
+                self._geocoding_cache = {}
+                print("No geocoding cache found, starting fresh.")
+        except Exception as e:
+            print(f"Error loading geocoding cache: {e}")
+            self._geocoding_cache = {}
 
-        # Per-decade
-        print("=== Per-Decade Marriage Age Stats ===")
-        grand_total = 0
-        for decade in sorted(decade_data):
-            bride_list = decade_data[decade]["bride"]
-            groom_list = decade_data[decade]["groom"]
-            all_ages = bride_list + groom_list
-            n_records = max(len(bride_list), len(groom_list))
-            grand_total += n_records
-            bride_avg, groom_avg = avg(bride_list), avg(groom_list)
-            bride_min, bride_max = minmax(bride_list)
-            groom_min, groom_max = minmax(groom_list)
-            overall_avg = avg(all_ages)
-            print(f"{decade}s: {overall_avg} ({n_records} records)")
-            print(f"    Bride Avg: {bride_avg} (min: {bride_min}, max: {bride_max})")
-            print(f"    Groom Avg: {groom_avg} (min: {groom_min}, max: {groom_max})")
-        print(f"\nGrand total marriages: {grand_total}")
+    def _save_geocoding_cache(self):
+        """Save geocoding cache from memory to file."""
+        try:
+            self._cache_dir.mkdir(exist_ok=True)
+            with open(self._geocoding_cache_file, 'w', encoding='utf-8') as f:
+                json.dump(self._geocoding_cache, f, indent=2, ensure_ascii=False)
+            print(f"Saved {len(self._geocoding_cache)} locations to geocoding cache.")
+        except Exception as e:
+            print(f"Error saving geocoding cache: {e}")
 
-        # Per-century
-        print("\n=== Per-Century Marriage Age Stats ===")
-        for century in sorted(century_data):
-            bride_list = century_data[century]["bride"]
-            groom_list = century_data[century]["groom"]
-            all_ages = bride_list + groom_list
-            n_records = max(len(bride_list), len(groom_list))
-            bride_avg, groom_avg = avg(bride_list), avg(groom_list)
-            bride_min, bride_max = minmax(bride_list)
-            groom_min, groom_max = minmax(groom_list)
-            overall_avg = avg(all_ages)
-            century_label = f"{century//100+1}th century" if century >= 1000 else f"{century}s"
-            print(f"{century_label}: {overall_avg} ({n_records} records)")
-            print(f"    Bride Avg: {bride_avg} (min: {bride_min}, max: {bride_max})")
-            print(f"    Groom Avg: {groom_avg} (min: {groom_min}, max: {groom_max})")
 
-        # Flag individuals over 40 (ordered by age descending)
-        if groom_over_40:
-            print("\nGrooms over 40 at marriage:")
-            for g in sorted(groom_over_40, key=lambda x: -x['age']):
-                print(f"  {g['name']} (Family {g['fam_id']}): Age {g['age']} in {g['marriage_year']}")
-        if bride_over_40:
-            print("\nBrides over 40 at marriage:")
-            for b in sorted(bride_over_40, key=lambda x: -x['age']):
-                print(f"  {b['name']} (Family {b['fam_id']}): Age {b['age']} in {b['marriage_year']}")
 
-        # Flag individuals under 16 (ordered by age ascending)
-        if groom_under_16:
-            print("\nGrooms under 16 at marriage (possible invalid data):")
-            for g in sorted(groom_under_16, key=lambda x: x['age']):
-                print(f"  {g['name']} (Family {g['fam_id']}): Age {g['age']} in {g['marriage_year']}")
-        if bride_under_16:
-            print("\nBrides under 16 at marriage (possible invalid data):")
-            for b in sorted(bride_under_16, key=lambda x: x['age']):
-                print(f"  {b['name']} (Family {b['fam_id']}): Age {b['age']} in {b['marriage_year']}")
 
-        # If average is above 40, show all records
-        if (avg(groom_ages) and avg(groom_ages) > 40) or (avg(bride_ages) and avg(bride_ages) > 40):
-            print("\n*** WARNING: Average age above 40 detected. Listing all marriage ages: ***")
-            print("\nAll groom ages:")
-            for fam in self._family_index.values():
-                husband_id = wife_id = None
-                husband_birth = marriage_year = None
-                for sub in getattr(fam.raw_record, "sub_records", []):
-                    if getattr(sub, "tag", None) == "HUSB" and sub.value:
-                        husband_id = str(sub.value)
-                for sub in getattr(fam.raw_record, "sub_records", []):
-                    if getattr(sub, "tag", None) in ("MARR", "MARRIAGE", "WEDDING"):
-                        for sub2 in getattr(sub, "sub_records", []):
-                            if getattr(sub2, "tag", None) == "DATE" and sub2.value:
-                                try:
-                                    marriage_year = int(str(sub2.value).strip()[-4:])
-                                except Exception:
-                                    marriage_year = None
-                                break
-                husband_birth = birth_years.get(husband_id)
-                if husband_birth and marriage_year and marriage_year >= husband_birth:
-                    age = marriage_year - husband_birth
-                    print(f"  {names.get(husband_id, husband_id)}: Age {age} in {marriage_year} (Family {fam.xref_id})")
-            print("\nAll bride ages:")
-            for fam in self._family_index.values():
-                wife_id = None
-                wife_birth = marriage_year = None
-                for sub in getattr(fam.raw_record, "sub_records", []):
-                    if getattr(sub, "tag", None) == "WIFE" and sub.value:
-                        wife_id = str(sub.value)
-                for sub in getattr(fam.raw_record, "sub_records", []):
-                    if getattr(sub, "tag", None) in ("MARR", "MARRIAGE", "WEDDING"):
-                        for sub2 in getattr(sub, "sub_records", []):
-                            if getattr(sub2, "tag", None) == "DATE" and sub2.value:
-                                try:
-                                    marriage_year = int(str(sub2.value).strip()[-4:])
-                                except Exception:
-                                    marriage_year = None
-                                break
-                wife_birth = birth_years.get(wife_id)
-                if wife_birth and marriage_year and marriage_year >= wife_birth:
-                    age = marriage_year - wife_birth
-                    print(f"  {names.get(wife_id, wife_id)}: Age {age} in {marriage_year} (Family {fam.xref_id})")
+
+
+
+
+
+
+    def _get_geocoded_location(self, place_name: str, person_info: dict = None):
+        """Get geocoded location using enhanced UK-preference algorithm."""
+        if not place_name or not place_name.strip():
+            return None
+        
+        place_key = place_name.strip()
+        
+        # Direct cache match first - silent
+        if place_key in self._geocoding_cache:
+            cached_data = self._geocoding_cache[place_key]
+            
+            if cached_data.get('lat') is not None and cached_data.get('lng') is not None:
+                return {
+                    'latitude': cached_data['lat'],
+                    'longitude': cached_data['lng'],
+                    'source': 'cache'
+                }
+            else:
+                return None
+        
+        # Try geocoding with enhanced algorithm
+        try:
+            from geopy.geocoders import Nominatim
+            import time
+            
+            geolocator = Nominatim(user_agent="family_tree_mapper_v1.0")
+            uk_indicators = ['united kingdom', 'uk', 'great britain', 'gb', 'england', 'wales', 'scotland', 'northern ireland']
+            
+            # Step 1: Try single result first
+            location = geolocator.geocode(place_name, timeout=15)
+            chosen_location = None
+            
+            if location:
+                # Check if single result is UK
+                address_lower = location.address.lower()
+                is_uk = any(indicator in address_lower for indicator in uk_indicators)
+                
+                if is_uk:
+                    # Single result is UK - use it!
+                    chosen_location = location
+                else:
+                    # Single result is NOT UK - check for multiple results
+                    pass  # Will fall through to multiple results check
+            
+            # Step 2: If single result wasn't UK or didn't exist, try multiple results
+            if not chosen_location:
+                locations = geolocator.geocode(place_name, exactly_one=False, timeout=15)
+                
+                if locations:
+                    uk_locations = []
+                    
+                    # Filter UK locations
+                    for loc in locations:
+                        address_lower = loc.address.lower()
+                        is_uk = any(indicator in address_lower for indicator in uk_indicators)
+                        if is_uk:
+                            uk_locations.append(loc)
+                    
+                    # Step 3: Process UK results
+                    if uk_locations:
+                        if len(uk_locations) == 1:
+                            # Single UK location - use it
+                            chosen_location = uk_locations[0]
+                        else:
+                            # Multiple UK locations - check places config
+                            places_config_match = self._find_places_config_match(place_name, uk_locations)
+                            
+                            if places_config_match:
+                                chosen_location = places_config_match
+                            else:
+                                # No places config match - use first UK location
+                                chosen_location = uk_locations[0]
+                    else:
+                        # No UK locations in multiple results
+                        if location:  # Use original single result if it existed
+                            chosen_location = location
+                        elif locations:  # Use first multiple result
+                            chosen_location = locations[0]
+                else:
+                    # No multiple results found
+                    if location:  # Use original single result if it existed
+                        chosen_location = location
+            
+            # Step 4: Cache and return the chosen location
+            if chosen_location:
+                cache_entry = {
+                    'lat': chosen_location.latitude,
+                    'lng': chosen_location.longitude,
+                    'cached_date': datetime.now().isoformat(),
+                    'source': 'nominatim_enhanced_uk_preference',
+                    'geocoded_address': chosen_location.address
+                }
+                self._geocoding_cache[place_key] = cache_entry
+                
+                time.sleep(1)  # Rate limiting
+                
+                return {
+                    'latitude': chosen_location.latitude,
+                    'longitude': chosen_location.longitude,
+                    'source': 'geocoded'
+                }
+            
+            # Step 5: If everything failed, try the old smart part matching as fallback
+            return self._fallback_smart_part_matching(place_name, person_info, geolocator, uk_indicators)
+            
+        except Exception as e:
+            print(f"Error in enhanced geocoding for '{place_name}': {e}")
+            if person_info:
+                print(f"   → Person: {person_info.get('name', 'Unknown')} (born {person_info.get('birth_year', 'Unknown')})")
+            return None
+
+    def _fallback_smart_part_matching(self, place_name: str, person_info: dict, geolocator, uk_indicators):
+        """Fallback to smart part matching when full address methods fail."""
+        if ',' not in place_name:
+            # Single place name - cache failure and exit
+            self._geocoding_cache[place_name] = {
+                'lat': None,
+                'lng': None,
+                'cached_date': datetime.now().isoformat(),
+                'source': 'failed_single_name_enhanced'
+            }
+            
+            print(f"  ✗ Single place name '{place_name}' not found")
+            if person_info:
+                print(f"      → FULL ADDRESS: '{place_name}'")
+                print(f"      → Person: {person_info.get('name', 'Unknown')} (born {person_info.get('birth_year', 'Unknown')})")
+                print(f"      → You may want to check/modify this address in the source data")
+            
+            return None
+        
+        print(f"  → FULL ADDRESS: '{place_name}' - Enhanced methods failed, trying smart part matching...")
+        
+        # Split into parts and try each
+        place_parts = [p.strip() for p in place_name.split(',') if p.strip()]
+        
+        for i, part in enumerate(place_parts):
+            if len(part) <= 3:  # Skip very short parts
+                continue
+            
+            try:
+                print(f"  → Geocoding part '{part}'...")
+                locations = geolocator.geocode(part, exactly_one=False, timeout=10)
+                
+                if not locations:
+                    print(f"    ✗ No results for '{part}'")
+                    continue
+                
+                if len(locations) == 1:
+                    # Only one result - use it
+                    location = locations[0]
+                    
+                    cache_entry = {
+                        'lat': location.latitude,
+                        'lng': location.longitude,
+                        'cached_date': datetime.now().isoformat(),
+                        'source': 'nominatim_fallback_single_part',
+                        'geocoded_address': location.address,
+                        'derived_from': part
+                    }
+                    self._geocoding_cache[place_name] = cache_entry
+                    
+                    time.sleep(1)
+                    return {
+                        'latitude': location.latitude,
+                        'longitude': location.longitude,
+                        'source': 'geocoded'
+                    }
+                
+                else:
+                    # Multiple results - favor UK locations
+                    print(f"    ⚠️  Multiple results for '{part}' ({len(locations)} found)")
+                    if person_info:
+                        print(f"        → FULL ADDRESS: '{place_name}'")
+                        print(f"        → Person: {person_info.get('name', 'Unknown')} (born {person_info.get('birth_year', 'Unknown')})")
+                    
+                    # Look for UK locations
+                    uk_location = None
+                    for location in locations:
+                        address_lower = location.address.lower()
+                        if any(indicator in address_lower for indicator in uk_indicators):
+                            uk_location = location
+                            break
+                    
+                    if uk_location:
+                        print(f"    ✓ Found UK location in results: {uk_location.address}")
+                        
+                        cache_entry = {
+                            'lat': uk_location.latitude,
+                            'lng': uk_location.longitude,
+                            'cached_date': datetime.now().isoformat(),
+                            'source': 'nominatim_fallback_uk_preferred',
+                            'geocoded_address': uk_location.address,
+                            'derived_from': part,
+                            'total_alternatives': len(locations)
+                        }
+                        self._geocoding_cache[place_name] = cache_entry
+                        
+                        time.sleep(1)
+                        return {
+                            'latitude': uk_location.latitude,
+                            'longitude': uk_location.longitude,
+                            'source': 'geocoded'
+                        }
+                    
+                    # No UK location - try combining with next part
+                    if i + 1 < len(place_parts):
+                        combined_query = f"{place_parts[i]}, {place_parts[i+1]}"
+                        print(f"    → Trying combined query: '{combined_query}'")
+                        
+                        combined_location = geolocator.geocode(combined_query, timeout=10)
+                        
+                        if combined_location:
+                            # Check if this combined result matches one of the multiple results
+                            for multi_loc in locations:
+                                lat_diff = abs(combined_location.latitude - multi_loc.latitude)
+                                lng_diff = abs(combined_location.longitude - multi_loc.longitude)
+                                
+                                if lat_diff < 0.01 and lng_diff < 0.01:  # ~1km tolerance
+                                    cache_entry = {
+                                        'lat': combined_location.latitude,
+                                        'lng': combined_location.longitude,
+                                        'cached_date': datetime.now().isoformat(),
+                                        'source': 'nominatim_fallback_combined_parts',
+                                        'geocoded_address': combined_location.address,
+                                        'derived_from': combined_query
+                                    }
+                                    self._geocoding_cache[place_name] = cache_entry
+                                    
+                                    time.sleep(1)
+                                    return {
+                                        'latitude': combined_location.latitude,
+                                        'longitude': combined_location.longitude,
+                                        'source': 'geocoded'
+                                    }
+                            
+                            print(f"    ✗ Combined query result doesn't match any of the multiple results")
+                        else:
+                            print(f"    ✗ Combined query '{combined_query}' failed")
+                    
+                    print(f"    ✗ Cannot resolve ambiguous location '{part}' (no UK match found)")
+                    continue
+                    
+            except Exception as e:
+                print(f"    ✗ Error geocoding part '{part}': {e}")
+                continue
+        
+        # All methods failed - cache the failure
+        self._geocoding_cache[place_name] = {
+            'lat': None,
+            'lng': None,
+            'cached_date': datetime.now().isoformat(),
+            'source': 'failed_all_enhanced_methods'
+        }
+        
+        print(f"  ✗ GEOCODING FAILED: Could not geocode any part of: {place_name}")
+        
+        if person_info:
+            print(f"      → FULL ADDRESS: '{place_name}'")
+            print(f"      → Person: {person_info.get('name', 'Unknown')} (born {person_info.get('birth_year', 'Unknown')})")
+            print(f"      → You may want to check/modify this address in the source data")
+        
+        return None
+
+
+
+
+
+
+
+
+
+
+
+    def _find_uk_location_in_results(self, locations) -> object:
+        """Find UK location among multiple geocoding results."""
+        uk_indicators = [
+            'united kingdom', 'uk', 'great britain', 'gb',
+            'england', 'wales', 'scotland', 'northern ireland',
+            'royaume-uni',  # French name sometimes appears
+        ]
+        
+        for location in locations:
+            address_lower = location.address.lower()
+            if any(indicator in address_lower for indicator in uk_indicators):
+                return location
+        
+        return None
+
+
+
+
+
+
+
+
+
+
+    def clear_geocoding_cache(self):
+        """Clear the geocoding cache (for debugging or cache corruption)."""
+        self._geocoding_cache = {}
+        if self._geocoding_cache_file.exists():
+            self._geocoding_cache_file.unlink()
+        print("Geocoding cache cleared.")
+        input("\nPress Enter to continue...")
+
+    def clear_cache(self):
+        """Manually clear the relationship index cache."""
+        try:
+            import shutil
+            if self._cache_dir.exists():
+                shutil.rmtree(self._cache_dir)
+                print("All caches cleared successfully (indexes and geocoding).")
+            else:
+                print("No cache to clear.")
+        except Exception as e:
+            print(f"Error clearing cache: {e}")
 
     def analyse_years_lived(self):
         """
@@ -2249,3 +2690,934 @@ class Ged4PyGedcomDB(GedcomDB):
             print(f"{century_label}: {overall_avg} avg ({n_records} records)")
             print(f"    Male Avg: {male_avg} (max: {male_max}) [{len(male_list)} records]")
             print(f"    Female Avg: {female_avg} (max: {female_max}) [{len(female_list)} records]")
+
+    def get_birth_places_data(self) -> dict:
+        """Get birth places data that can be used for mapping or other purposes."""
+        if hasattr(self, "ancestor_filter_ids") and self.ancestor_filter_ids:
+            individuals = [self._individual_index[xref_id] for xref_id in self.ancestor_filter_ids if xref_id in self._individual_index]
+        else:
+            individuals = list(self._individual_index.values())
+        
+        places_data = {}
+        
+        for ind in individuals:
+            if ind.birth_place:
+
+
+                if 'chester' in ind.birth_place.lower():
+                    print(f"🏴󠁧󠁢󠁥󠁮󠁧󠁿 CHESTER DEBUG: Found person born in Chester area: {ind.name} (born {ind.birth_year}) - Place: '{ind.birth_place}'")
+
+
+                place = ind.birth_place.strip()
+                if place not in places_data:
+                    places_data[place] = {
+                        'people': [],
+                        'count': 0,
+                        'birth_years': []
+                    }
+                
+                places_data[place]['people'].append({
+                    'name': ind.name,
+                    'xref_id': ind.xref_id,
+                    'birth_year': ind.birth_year
+                })
+                places_data[place]['count'] += 1
+                
+                if ind.birth_year:
+                    places_data[place]['birth_years'].append(ind.birth_year)
+        
+        return places_data
+
+    def export_places_to_kml(self, places_data: dict):
+        """KML export not implemented."""
+        print("KML export functionality not implemented.")
+        print("Use option 1 (Google Maps URL) instead.")
+        input("\nPress Enter to continue...")
+
+    def create_interactive_map(self, places_data: dict):
+        """Interactive mapping not implemented."""
+        print("Interactive HTML mapping requires additional packages and setup.")
+        print("Use option 1 (Google Maps URL) instead.")
+        input("\nPress Enter to continue...")
+
+    def create_google_maps_url(self, places_data: dict):
+        """Generate a Google Maps URL with birth place markers."""
+        if not places_data:
+            print("No birth places found.")
+            return
+        
+        # For individual pins, we can either:
+        # 1. Open the first location and let user search for others
+        # 2. Create a My Maps URL (requires manual import)
+        
+        places_list = list(places_data.keys())
+        
+        if len(places_list) == 1:
+            # Single location - direct map link
+            place = places_list[0]
+            clean_place = place.replace(' ', '+').replace(',', '%2C')
+            maps_url = f"https://www.google.com/maps/search/{clean_place}"
+        else:
+            # Multiple locations - show first one and print instructions
+            first_place = places_list[0]
+            clean_place = first_place.replace(' ', '+').replace(',', '%2C')
+            maps_url = f"https://www.google.com/maps/search/{clean_place}"
+            
+            print(f"Found {len(places_data)} unique birth places:")
+            print(f"Opening map for: {first_place}")
+            print(f"\nTo see all locations as pins, search for these in Google Maps:")
+            
+            for i, place in enumerate(places_list, 1):
+                data = places_data[place]
+                year_range = ""
+                if data['birth_years']:
+                    min_year = min(data['birth_years'])
+                    max_year = max(data['birth_years'])
+                    year_range = f" ({min_year}-{max_year})" if min_year != max_year else f" ({min_year})"
+                
+                print(f"  {i}. {place}: {data['count']} people{year_range}")
+        
+        print(f"\nOpening Google Maps...")
+        
+        # Open in default browser
+        webbrowser.open(maps_url)
+        
+        return maps_url
+
+
+
+
+
+
+    def _cluster_places_by_coordinates(self, places_data: dict) -> dict:
+        """Group places by their coordinates to avoid duplicate pins."""
+        coordinate_clusters = {}
+        
+        for place, data in places_data.items():
+            # Create person info for the first person at this location (for error reporting)
+            person_info = None
+            if data.get('people') and len(data['people']) > 0:
+                first_person = data['people'][0]
+                person_info = {
+                    'name': first_person.get('name', 'Unknown'),
+                    'birth_year': first_person.get('birth_year', 'Unknown')
+                }
+            
+            location_data = self._get_geocoded_location(place, person_info)
+            
+            if location_data:
+                # Round coordinates to avoid tiny differences
+                lat = round(location_data['latitude'], 4)  # ~11m precision
+                lng = round(location_data['longitude'], 4)
+                coord_key = f"{lat},{lng}"
+                
+                if coord_key not in coordinate_clusters:
+                    coordinate_clusters[coord_key] = {
+                        'latitude': location_data['latitude'],
+                        'longitude': location_data['longitude'],
+                        'places': [],
+                        'total_people': 0,
+                        'all_people': [],
+                        'all_birth_years': []
+                    }
+                
+                # Add this place's data to the cluster
+                coordinate_clusters[coord_key]['places'].append({
+                    'name': place,
+                    'count': data['count'],
+                    'people': data['people']
+                })
+                coordinate_clusters[coord_key]['total_people'] += data['count']
+                coordinate_clusters[coord_key]['all_people'].extend(data['people'])
+                coordinate_clusters[coord_key]['all_birth_years'].extend(data.get('birth_years', []))
+        
+        return coordinate_clusters
+
+
+
+
+
+
+    def create_folium_map(self, places_data: dict):
+        """Create interactive map using Folium with coordinate-based clustering to avoid duplicate pins."""
+        try:
+            import folium
+            from folium import DivIcon
+        except ImportError:
+            print("This option requires additional packages:")
+            print("pip install folium geopy")
+            return
+        
+        if not places_data:
+            print("No birth places found.")
+            return
+        
+        # Create map centered on UK
+        m = folium.Map(location=[54.5, -2.0], zoom_start=6)
+        
+        geocoded_count = 0
+        cached_count = 0
+        failed_count = 0
+        
+        # Cluster places by coordinates first
+        coordinate_clusters = self._cluster_places_by_coordinates(places_data)
+        
+        print(f"Processing {len(places_data)} places into {len(coordinate_clusters)} map locations...")
+        
+        for coord_key, cluster in coordinate_clusters.items():
+            if cluster['total_people'] == 0:
+                continue
+                
+            # Track geocoding stats
+            # (Note: geocoding already happened in _cluster_places_by_coordinates)
+            cached_count += 1  # All are from cache now since clustering already geocoded them
+            
+            # Create popup showing all places at this location
+            place_summaries = []
+            for place_info in cluster['places']:
+                place_summaries.append(f"• {place_info['name']}: {place_info['count']} people")
+            
+            year_range = ""
+            if cluster['all_birth_years']:
+                min_year = min(cluster['all_birth_years'])
+                max_year = max(cluster['all_birth_years'])
+                year_range = f" ({min_year}-{max_year})" if min_year != max_year else f" ({min_year})"
+            
+            # Determine the primary place name for the tooltip
+            primary_place = cluster['places'][0]['name']
+            if len(cluster['places']) > 1:
+                tooltip_text = f"{primary_place} + {len(cluster['places'])-1} more locations ({cluster['total_people']} people)"
+            else:
+                tooltip_text = f"{primary_place} ({cluster['total_people']} people)"
+            
+            popup_html = f"""
+            <b>Location Cluster</b>{year_range}<br/>
+            <i>{cluster['total_people']} people born here:</i><br/>
+            {"<br/>".join(place_summaries)}<br/>
+            <br/><b>People:</b><br/>
+            {', '.join([p['name'] for p in cluster['all_people'][:15]])}
+            {"<br/>...and more" if len(cluster['all_people']) > 15 else ""}
+            """
+            
+            count = cluster['total_people']
+            
+            # Choose marker style based on count
+            if count == 1:
+                # Single person - use standard marker
+                folium.Marker(
+                    [cluster['latitude'], cluster['longitude']],
+                    popup=folium.Popup(popup_html, max_width=300),
+                    tooltip=tooltip_text,
+                    icon=folium.Icon(color='blue', icon='user', prefix='fa')
+                ).add_to(m)
+            else:
+                # Multiple people - use numbered marker
+                # Choose color based on count
+                if count <= 5:
+                    color = '#4285f4'  # Blue
+                    text_color = 'white'
+                elif count <= 10:
+                    color = '#ea4335'  # Red
+                    text_color = 'white'
+                elif count <= 20:
+                    color = '#fbbc05'  # Yellow
+                    text_color = 'black'
+                else:
+                    color = '#34a853'  # Green
+                    text_color = 'white'
+                
+                # Create custom numbered marker
+                html = f"""
+                <div style="
+                    background-color: {color};
+                    border: 2px solid white;
+                    border-radius: 50%;
+                    width: 30px;
+                    height: 30px;
+                    display: flex;
+                    justify-content: center;
+                    align-items: center;
+                    font-weight: bold;
+                    font-size: 14px;
+                    color: {text_color};
+                    box-shadow: 0 2px 4px rgba(0,0,0,0.3);
+                ">{count}</div>
+                """
+                
+                folium.Marker(
+                    [cluster['latitude'], cluster['longitude']],
+                    popup=folium.Popup(popup_html, max_width=300),
+                    tooltip=tooltip_text,
+                    icon=DivIcon(
+                        html=html,
+                        icon_size=(30, 30),
+                        icon_anchor=(15, 15)
+                    )
+                ).add_to(m)
+        
+        # Calculate failed count
+        failed_count = len(places_data) - sum(len(cluster['places']) for cluster in coordinate_clusters.values())
+        
+        # Add a legend
+        legend_html = """
+        <div style="position: fixed; 
+                    bottom: 50px; left: 50px; width: 220px; height: 140px; 
+                    background-color: white; border:2px solid grey; z-index:9999; 
+                    font-size:14px; padding: 10px; border-radius: 5px;
+                    box-shadow: 0 2px 4px rgba(0,0,0,0.3);
+                    ">
+        <h4>Birth Places Legend</h4>
+        <p><i class="fa fa-user" style="color:blue"></i> 1 person</p>
+        <p><span style="color:#4285f4">●</span> 2-5 people</p>
+        <p><span style="color:#ea4335">●</span> 6-10 people</p>
+        <p><span style="color:#fbbc05">●</span> 11-20 people</p>
+        <p><span style="color:#34a853">●</span> 20+ people</p>
+        <p><small>Clustered by coordinates</small></p>
+        </div>
+        """
+        m.get_root().html.add_child(folium.Element(legend_html))
+        
+        # Save updated cache
+        self._save_geocoding_cache()
+        
+        filename = "birth_places_folium.html"
+        m.save(filename)
+        
+        print(f"Results: {len(coordinate_clusters)} pin locations, {failed_count} places failed geocoding")
+        print(f"Interactive map saved: {filename}")
+        
+        webbrowser.open('file://' + os.path.abspath(filename))
+        return filename
+
+    def create_openstreetmap_interactive(self, places_data: dict):
+        """Create interactive OpenStreetMap with markers using Leaflet."""
+        if not places_data:
+            print("No birth places found.")
+            return
+        
+        # Create HTML with Leaflet.js
+        html_content = '''<!DOCTYPE html>
+    <html>
+    <head>
+        <title>Family Tree Birth Places</title>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+        <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+        <style>
+            #map { height: 600px; width: 100%; }
+            body { margin: 0; font-family: Arial, sans-serif; }
+            .info { padding: 10px; background: #f8f9fa; margin: 10px; border-radius: 5px; }
+        </style>
+    </head>
+    <body>
+        <div class="info">
+            <h2>Family Tree Birth Places</h2>
+            <p>Click on markers to see details. Places listed below need manual geocoding.</p>
+        </div>
+        <div id="map"></div>
+        
+        <script>
+            // Initialize map centered on UK
+            var map = L.map('map').setView([54.5, -2.0], 6);
+            
+            // Add OpenStreetMap tiles
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                attribution: '© OpenStreetMap contributors'
+            }).addTo(map);
+            
+            // Add markers (you'll need to manually add coordinates)
+            var places = ['''
+
+        # Add place data (Note: you'd need geocoding for coordinates)
+        places_js = []
+        for place, data in places_data.items():
+            people_names = [p['name'] for p in data['people'][:5]]
+            more_text = f" and {data['count']-5} more" if data['count'] > 5 else ""
+            
+            year_range = ""
+            if data['birth_years']:
+                min_year = min(data['birth_years'])
+                max_year = max(data['birth_years'])
+                year_range = f" ({min_year}-{max_year})" if min_year != max_year else f" ({min_year})"
+            
+            # You'd need to geocode these - for now, just list them
+            places_js.append(f'            // {place}: {data["count"]} people{year_range}')
+            places_js.append(f'            // People: {", ".join(people_names)}{more_text}')
+        
+        html_content += '\n'.join(places_js)
+        
+        html_content += '''
+            ];
+            
+            // Note: Coordinates needed for actual pins
+            // For now, just center on UK and show place list below
+        </script>
+        
+        <div class="info">
+            <h3>Birth Places Found:</h3>
+            <ul>'''
+        
+        for place, data in places_data.items():
+            year_range = ""
+            if data['birth_years']:
+                min_year = min(data['birth_years'])
+                max_year = max(data['birth_years'])
+                year_range = f" ({min_year}-{max_year})" if min_year != max_year else f" ({min_year})"
+            
+            html_content += f'<li><strong>{place}</strong>: {data["count"]} people{year_range}</li>'
+        
+        html_content += '''
+            </ul>
+            <p><em>To add pins to the map, you would need to geocode these place names to coordinates.</em></p>
+        </div>
+    </body>
+    </html>'''
+        
+        filename = "birth_places_openstreetmap.html"
+        with open(filename, 'w', encoding='utf-8') as f:
+            f.write(html_content)
+        
+        print(f"OpenStreetMap created: {filename}")
+        webbrowser.open('file://' + os.path.abspath(filename))
+        return filename
+
+    def plot_birth_places_menu(self):
+        """Menu for birth place mapping options."""
+        print("\n=== Birth Place Mapping ===")
+        print("1. Google Maps URL (limited to one location)")
+        print("2. OpenStreetMap HTML (manual geocoding needed)")
+        print("3. Interactive Folium map (auto-geocoding)")
+        print("4. CSV export for manual mapping")
+        
+        choice = input("Choose option (1-4): ").strip()
+        
+        places_data = self.get_birth_places_data()
+        
+        if choice == '1':
+            self.create_google_maps_url(places_data)
+        elif choice == '2':
+            self.create_openstreetmap_interactive(places_data)
+        elif choice == '3':
+            self.create_folium_map(places_data)
+        elif choice == '4':
+            self.export_places_csv(places_data)
+        else:
+            print("Invalid choice.")
+        
+        input("\nPress Enter to continue...")
+
+        """Show geocoding cache statistics."""
+        print(f"\nGeocoding Cache Statistics:")
+        print(f"Cache file: {self._geocoding_cache_file}")
+        print(f"Total entries: {len(self._geocoding_cache)}")
+        
+        if self._geocoding_cache:
+            sources = {}
+            for entry in self._geocoding_cache.values():
+                source = entry.get('source', 'unknown')
+                sources[source] = sources.get(source, 0) + 1
+            
+            print(f"Entries by source:")
+            for source, count in sources.items():
+                print(f"  {source}: {count}")
+                
+            # Count successful vs failed
+            successful = sum(1 for entry in self._geocoding_cache.values() 
+                           if entry.get('lat') is not None and entry.get('lng') is not None)
+            failed = len(self._geocoding_cache) - successful
+            print(f"Successful geocodes: {successful}")
+            print(f"Failed geocodes: {failed}")
+        
+        input("\nPress Enter to continue...")
+
+    def admin_menu(self):
+        """Admin functions menu."""
+        while True:
+            print("\n" + "="*50)
+            print("ADMIN MENU")
+            print("="*50)
+            print("1. Clear geocoding cache")
+            print("2. Show cache statistics")
+            print("0. Back to main menu")
+            
+            choice = input("\nEnter your choice: ").strip()
+            
+            if choice == '0':
+                break
+            elif choice == '1':
+                confirm = input("Are you sure you want to clear the geocoding cache? This will require re-geocoding all places. (y/N): ").strip().lower()
+                if confirm == 'y':
+                    self.clear_geocoding_cache()
+                else:
+                    print("Cache clear cancelled.")
+                    input("\nPress Enter to continue...")
+            elif choice == '2':
+                self.show_cache_stats()
+            else:
+                print("Invalid choice. Please try again.")
+                input("\nPress Enter to continue...")
+
+
+
+
+
+    def check_parents_died_before_children_born(self):
+        """Check for parents who died before their children were born."""
+        print("\n=== Parents Who Died Before Children Were Born ===\n")
+        
+        # Use ancestor filter if present
+        if hasattr(self, "ancestor_filter_ids") and self.ancestor_filter_ids:
+            individuals = [self._individual_index[xref_id] for xref_id in self.ancestor_filter_ids if xref_id in self._individual_index]
+            tree_context = f"current ancestry tree ({len(self.ancestor_filter_ids)} individuals)"
+        else:
+            individuals = list(self._individual_index.values())
+            tree_context = f"entire database ({len(individuals)} individuals)"
+        
+        print(f"Checking {tree_context}...")
+        
+        # Ask user what to check
+        print("\nWhat would you like to check?")
+        print("1. Mothers only")
+        print("2. Fathers only")
+        print("3. Both mothers and fathers")
+        
+        while True:
+            choice = input("Enter choice (1-3): ").strip()
+            if choice in ['1', '2', '3']:
+                break
+            print("Please enter 1, 2, or 3.")
+        
+        check_mothers = choice in ['1', '3']
+        check_fathers = choice in ['2', '3']
+        
+        def format_date_precisely(individual):
+            """Format date showing only what we actually know."""
+            if individual.birth_date:
+                # We have a full date - show it properly formatted
+                return individual.birth_date.strftime('%d %b %Y')
+            elif individual.birth_year:
+                # Only have year
+                return str(individual.birth_year)
+            else:
+                return "Unknown"
+        
+        # Build parent-child relationships with dates
+        parent_issues = {'mothers': {}, 'fathers': {}}
+        
+        for individual in individuals:
+            # Skip if no birth date
+            if not individual.birth_date:
+                continue
+                
+            # Get parents using fast lookup
+            parents = self.get_parents_fast(individual.xref_id)
+            
+            for parent in parents:
+                # Skip if parent has no death date
+                if not parent.death_date:
+                    continue
+                
+                # Determine parent gender
+                parent_gender = None
+                if hasattr(parent, 'raw_record') and parent.raw_record:
+                    for sub in parent.raw_record.sub_records:
+                        if getattr(sub, 'tag', None) == 'SEX':
+                            parent_gender = (sub.value or '').strip().upper()
+                            break
+                
+                # Skip if we can't determine gender or not checking this gender
+                if parent_gender == 'F' and not check_mothers:
+                    continue
+                if parent_gender == 'M' and not check_fathers:
+                    continue
+                if parent_gender not in ['M', 'F']:
+                    continue
+                
+                # Check timing based on gender
+                is_problematic = False
+                
+                if parent_gender == 'F':
+                    # For mothers: any death before birth is problematic
+                    if parent.death_date < individual.birth_date:
+                        is_problematic = True
+                else:  # parent_gender == 'M'
+                    # For fathers: death must be more than 9 months before birth
+                    days_gap = (individual.birth_date - parent.death_date).days
+                    if days_gap > 270:  # ~9 months
+                        is_problematic = True
+                
+                if is_problematic:
+                    # Calculate gap details
+                    days_gap = (individual.birth_date - parent.death_date).days
+                    years_gap = days_gap / 365.25
+                    months_gap = days_gap / 30.44  # Average month length
+                    
+                    # Determine category
+                    category = 'mothers' if parent_gender == 'F' else 'fathers'
+                    
+                    # Initialize parent entry if not exists
+                    if parent.xref_id not in parent_issues[category]:
+                        parent_issues[category][parent.xref_id] = {
+                            'parent': parent,
+                            'children_after_death': [],
+                            'total_children': 0
+                        }
+                    
+                    # Add this problematic child
+                    parent_issues[category][parent.xref_id]['children_after_death'].append({
+                        'child': individual,
+                        'days_gap': days_gap,
+                        'years_gap': years_gap,
+                        'months_gap': months_gap
+                    })
+        
+        # Count total children for each problematic parent
+        for category in ['mothers', 'fathers']:
+            for parent_id in parent_issues[category].keys():
+                all_children = self.get_children_fast(parent_id)
+                parent_issues[category][parent_id]['total_children'] = len(all_children)
+        
+        # Check if any issues found
+        total_issues = len(parent_issues['mothers']) + len(parent_issues['fathers'])
+        if total_issues == 0:
+            print("✓ No problematic parent-child timing issues found.")
+            input("\nPress Enter to continue...")
+            return
+        
+        # Display results
+        for category in ['mothers', 'fathers']:
+            if not parent_issues[category] or (category == 'mothers' and not check_mothers) or (category == 'fathers' and not check_fathers):
+                continue
+            
+            print(f"\n{'='*20} {category.upper()} {'='*20}")
+            
+            # Sort by number of problematic children (most issues first)
+            sorted_parents = sorted(parent_issues[category].items(), 
+                                key=lambda x: len(x[1]['children_after_death']), 
+                                reverse=True)
+            
+            print(f"Found {len(sorted_parents)} {category} with children born after their death:\n")
+            
+            for parent_id, data in sorted_parents:
+                parent = data['parent']
+                problematic_children = data['children_after_death']
+                total_children = data['total_children']
+                
+                # Format parent info with precise dates
+                parent_birth = format_date_precisely(parent)
+                parent_death = format_date_precisely(parent) if hasattr(parent, 'death_date') and parent.death_date else (str(parent.death_year) if hasattr(parent, 'death_year') and parent.death_year else "Unknown")
+                
+                # Fix: use death_date for parent_death formatting
+                if parent.death_date:
+                    parent_death = parent.death_date.strftime('%d %b %Y')
+                elif hasattr(parent, 'death_year') and parent.death_year:
+                    parent_death = str(parent.death_year)
+                else:
+                    parent_death = "Unknown"
+                
+                print(f"👤 {parent.name}")
+                print(f"   Born: {parent_birth}")
+                print(f"   Died: {parent_death}")
+                print(f"   Problematic children: {len(problematic_children)} of {total_children} total children")
+                
+                # Sort children by birth date
+                problematic_children.sort(key=lambda x: x['child'].birth_date)
+                
+                for i, child_data in enumerate(problematic_children, 1):
+                    child = child_data['child']
+                    days_gap = child_data['days_gap']
+                    months_gap = child_data['months_gap']
+                    years_gap = child_data['years_gap']
+                    
+                    child_birth = format_date_precisely(child)
+                    
+                    # Format gap description
+                    if days_gap < 365:
+                        gap_desc = f"{months_gap:.1f} months"
+                    else:
+                        gap_desc = f"{years_gap:.1f} years"
+                    
+                    print(f"   {i}. {child.name}")
+                    print(f"      Born: {child_birth}")
+                    print(f"      Gap: {gap_desc} after parent's death")
+                
+                print()  # Blank line between parents
+        
+        # Summary statistics
+        total_mothers = len(parent_issues['mothers'])
+        total_fathers = len(parent_issues['fathers'])
+        total_problematic_children = sum(len(data['children_after_death']) 
+                                    for category in parent_issues.values() 
+                                    for data in category.values())
+        
+        print(f"\nSummary:")
+        if check_mothers:
+            print(f"  Problematic mothers: {total_mothers}")
+        if check_fathers:
+            print(f"  Problematic fathers: {total_fathers}")
+        print(f"  Total problematic parent-child relationships: {total_problematic_children}")
+        
+        input("\nPress Enter to continue...")
+
+
+
+
+
+    def test_single_address_mapping(self):
+        """Test geocoding and mapping of a single address - temporary feature for debugging."""
+        print("\n" + "="*50)
+        print("SINGLE ADDRESS GEOCODING TEST")
+        print("="*50)
+        
+        # Get address from user
+        address = input("Enter full address to test: ").strip()
+        
+        if not address:
+            print("No address entered.")
+            return
+        
+        print(f"\nTesting address: '{address}'")
+        print("-" * 60)
+        
+        # Test with enhanced algorithm
+        try:
+            from geopy.geocoders import Nominatim
+            import time
+            
+            geolocator = Nominatim(user_agent="family_tree_mapper_v1.0")
+            
+            # Step 1: Try single result first
+            print(f"1. Testing SINGLE RESULT: '{address}'")
+            location = geolocator.geocode(address, timeout=15)
+            
+            chosen_location = None
+            
+            if location:
+                print(f"   ✓ SINGLE RESULT: {location.address}")
+                print(f"   Coordinates: {location.latitude:.6f}, {location.longitude:.6f}")
+                
+                # Check if single result is UK
+                address_lower = location.address.lower()
+                uk_indicators = ['united kingdom', 'uk', 'great britain', 'gb', 'england', 'wales', 'scotland', 'northern ireland']
+                is_uk = any(indicator in address_lower for indicator in uk_indicators)
+                print(f"   UK?: {'YES' if is_uk else 'NO'}")
+                
+                if is_uk:
+                    print("   → Single result is UK, using it!")
+                    chosen_location = location
+                else:
+                    print("   → Single result is NOT UK, checking for multiple results...")
+            else:
+                print(f"   ✗ No single result found")
+            
+            # Step 2: If single result wasn't UK or didn't exist, try multiple results
+            if not chosen_location:
+                print(f"\n2. Testing MULTIPLE RESULTS: '{address}'")
+                locations = geolocator.geocode(address, exactly_one=False, timeout=15)
+                
+                if locations:
+                    print(f"   Found {len(locations)} total results:")
+                    uk_locations = []
+                    
+                    for i, loc in enumerate(locations, 1):
+                        print(f"   {i:2}. {loc.address}")
+                        print(f"       Coords: {loc.latitude:.6f}, {loc.longitude:.6f}")
+                        
+                        # Check if this looks like UK
+                        address_lower = loc.address.lower()
+                        is_uk = any(indicator in address_lower for indicator in uk_indicators)
+                        print(f"       UK?: {'YES' if is_uk else 'NO'}")
+                        
+                        if is_uk:
+                            uk_locations.append(loc)
+                        print()
+                    
+                    # Step 3: Process UK results
+                    if uk_locations:
+                        print(f"   Found {len(uk_locations)} UK locations!")
+                        
+                        if len(uk_locations) == 1:
+                            print("   → Using single UK location")
+                            chosen_location = uk_locations[0]
+                        else:
+                            print("   → Multiple UK locations, checking places config...")
+                            
+                            # Step 4: Check against places config
+                            places_config_match = self._find_places_config_match(address, uk_locations)
+                            
+                            if places_config_match:
+                                print(f"   → Found places config match: {places_config_match.address}")
+                                chosen_location = places_config_match
+                            else:
+                                print("   → No places config match, using first UK location")
+                                chosen_location = uk_locations[0]
+                    else:
+                        print("   → No UK locations in multiple results")
+                        if location:  # Use original single result if it existed
+                            print("   → Falling back to original single result")
+                            chosen_location = location
+                        elif locations:  # Use first multiple result
+                            print("   → Using first multiple result")
+                            chosen_location = locations[0]
+                else:
+                    print(f"   ✗ No multiple results found")
+                    if location:  # Use original single result if it existed
+                        print("   → Falling back to original single result")
+                        chosen_location = location
+            
+            # Step 5: Final result
+            if chosen_location:
+                print(f"\n" + "="*60)
+                print("FINAL CHOSEN LOCATION:")
+                print(f"Address: {chosen_location.address}")
+                print(f"Coordinates: {chosen_location.latitude:.6f}, {chosen_location.longitude:.6f}")
+                
+                # Check if final result is UK
+                address_lower = chosen_location.address.lower()
+                is_uk = any(indicator in address_lower for indicator in uk_indicators)
+                print(f"Is UK: {'YES' if is_uk else 'NO'}")
+                print("="*60)
+                
+                # Create a simple map
+                try:
+                    import folium
+                    
+                    # Create Folium map
+                    m = folium.Map(location=[chosen_location.latitude, chosen_location.longitude], zoom_start=12)
+                    
+                    # Add marker
+                    popup_html = f"""
+                    <b>Test Address</b><br/>
+                    <i>{address}</i><br/>
+                    <br/>Final Result: {chosen_location.address}<br/>
+                    Coordinates: {chosen_location.latitude:.6f}, {chosen_location.longitude:.6f}<br/>
+                    UK Location: {'YES' if is_uk else 'NO'}
+                    """
+                    
+                    folium.Marker(
+                        [chosen_location.latitude, chosen_location.longitude],
+                        popup=folium.Popup(popup_html, max_width=300),
+                        tooltip=f"Test: {address}",
+                        icon=folium.Icon(color='green' if is_uk else 'red', icon='info-sign')
+                    ).add_to(m)
+                    
+                    # Save and open map
+                    filename = "test_single_address.html"
+                    m.save(filename)
+                    
+                    print(f"   ✅ Map created: {filename}")
+                    
+                    import webbrowser
+                    import os
+                    webbrowser.open('file://' + os.path.abspath(filename))
+                    
+                except ImportError:
+                    print("   Folium not available for mapping")
+            else:
+                print(f"\n✗ FAILED: No location could be determined for '{address}'")
+            
+        except Exception as e:
+            print(f"Error during geocoding test: {e}")
+            input("\nPress Enter to continue...")
+            return
+        
+        input("\nPress Enter to continue...")
+
+    def _find_places_config_match(self, original_address: str, uk_locations: list) -> object:
+        """Check if any UK locations match places from our places config."""
+        try:
+            places_config_file = self._base_dir / 'places_config.json'
+            
+            if not places_config_file.exists():
+                return None
+            
+            with open(places_config_file, 'r', encoding='utf-8') as f:
+                places_config = json.load(f)
+            
+            # Extract all place names from config
+            config_places = set()
+            
+            def extract_places_recursive(data):
+                if isinstance(data, dict):
+                    for key, value in data.items():
+                        if key not in {'_comment', 'nation_counties', 'county_places', 'nation_places', 'local2_places', 'known_streets'}:
+                            # Handle slash-separated places
+                            if '/' in key:
+                                config_places.update([p.strip().lower() for p in key.split('/') if p.strip()])
+                            else:
+                                config_places.add(key.lower())
+                            extract_places_recursive(value)
+                elif isinstance(data, list):
+                    for item in data:
+                        if isinstance(item, str):
+                            # Handle slash-separated places
+                            if '/' in item:
+                                config_places.update([p.strip().lower() for p in item.split('/') if p.strip()])
+                            else:
+                                config_places.add(item.lower())
+                        else:
+                            extract_places_recursive(item)
+            
+            extract_places_recursive(places_config)
+            
+            # Check original address parts against config
+            original_parts = [p.strip().lower() for p in original_address.split(',') if p.strip()]
+            config_matches_in_original = [part for part in original_parts if part in config_places]
+            
+            if not config_matches_in_original:
+                print(f"   → No parts of '{original_address}' found in places config")
+                return None
+            
+            print(f"   → Found config places in original address: {config_matches_in_original}")
+            
+            # Now check which UK locations contain these config places
+            best_match = None
+            best_match_count = 0
+            
+            for location in uk_locations:
+                location_lower = location.address.lower()
+                match_count = sum(1 for config_place in config_matches_in_original if config_place in location_lower)
+                
+                print(f"   → Checking: {location.address}")
+                print(f"     Config matches: {match_count}")
+                
+                if match_count > best_match_count:
+                    best_match = location
+                    best_match_count = match_count
+            
+            if best_match and best_match_count > 0:
+                print(f"   → Best config match ({best_match_count} matches): {best_match.address}")
+                return best_match
+            
+            return None
+            
+        except Exception as e:
+            print(f"   → Error checking places config: {e}")
+            return None
+
+    def export_places_csv(self, places_data: dict):
+        """Export places as CSV for import into mapping tools."""
+        if not places_data:
+            print("No birth places found.")
+            return
+        
+        csv_content = "Place,Count,People,Years\n"
+        
+        for place, data in places_data.items():
+            people_names = '; '.join([p['name'] for p in data['people']])
+            year_range = ""
+            if data['birth_years']:
+                min_year = min(data['birth_years'])
+                max_year = max(data['birth_years'])
+                year_range = f"{min_year}-{max_year}" if min_year != max_year else str(min_year)
+            
+            csv_content += f'"{place}",{data["count"]},"{people_names}","{year_range}"\n'
+        
+        filename = "birth_places.csv"
+        with open(filename, 'w', encoding='utf-8') as f:
+            f.write(csv_content)
+        
+        print(f"CSV exported: {filename}")
+        print("You can import this into Google My Maps, QGIS, or other mapping tools.")
+        return filename
