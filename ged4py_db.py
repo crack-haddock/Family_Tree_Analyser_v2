@@ -732,6 +732,7 @@ class Ged4PyIndividual(Individual):
         """
         Determine if this individual is deceased based on available death information.
         Checks both death_date and death_year properties, plus raw GEDCOM death records.
+        Also assumes anyone over 120 years old is deceased.
         """
         # Check parsed death date/year first
         if self.death_date or self.death_year:
@@ -742,6 +743,11 @@ class Ged4PyIndividual(Individual):
             for sub in self.raw_record.sub_records:
                 if sub.tag == 'DEAT':
                     return True  # Death event exists, even if no date
+        
+        # Check if age is over 120 (assume deceased)
+        current_age = self.calculate_age()
+        if current_age and current_age > 120:
+            return True
         
         return False
 
@@ -1224,6 +1230,298 @@ class Ged4PyGedcomDB(GedcomDB):
                     matches.append(indi_wrapper)
         
         return matches
+
+
+
+
+
+    def find_individual_by_name_with_details(self):
+        """Find and show detailed information for an individual by name."""
+        name = input("Enter name to search for: ").strip()
+        if not name:
+            return
+        
+        # Use the existing search method
+        matches = self.search_individuals_by_name(name)
+        
+        if not matches:
+            print(f"No individuals found matching '{name}'")
+            input("\nPress Enter to continue...")
+            return
+        
+        if len(matches) > 1:
+            print(f"Found {len(matches)} matches:")
+            for i, person in enumerate(matches, 1):
+                birth_year = person.birth_year or "Unknown"
+                
+                if person.is_deceased():
+                    death_year = person.death_year or "Unknown"
+                    death_display = f", died {death_year}"
+                elif person.calculate_age() and person.calculate_age() > 120:
+                    # Assume deceased if over 120
+                    death_display = ", died Unknown"
+                else:
+                    death_display = ""  # Don't show death info if living
+                
+                print(f"{i}. {person.name} (born {birth_year}{death_display})")
+
+            try:
+                choice = int(input("Select person (number): "))
+                if 1 <= choice <= len(matches):
+                    person = matches[choice - 1]
+                else:
+                    print("Invalid selection")
+                    input("\nPress Enter to continue...")
+                    return
+            except ValueError:
+                print("Invalid selection")
+                input("\nPress Enter to continue...")
+                return
+        else:
+            person = matches[0]
+        
+        # Ask if user wants debug data
+        debug_choice = input("Show debug/raw GEDCOM data including birth location fields? (y/N): ").strip().lower()
+        show_debug = debug_choice == 'y'
+        
+        print(f"\n" + "="*80)
+        print(f"INDIVIDUAL DETAILS: {person.name}")
+        print("="*80)
+        
+        # Basic information
+        print(f"GEDCOM ID: {person.xref_id}")
+        print(f"Name: {person.name}")
+        
+        # Birth information
+        print(f"\nBIRTH INFORMATION:")
+        print(f"  Birth Date: {person.birth_date.strftime('%d %b %Y') if person.birth_date else 'Unknown'}")
+        print(f"  Birth Year: {person.birth_year or 'Unknown'}")
+        print(f"  Birth Place: {person.birth_place or 'Unknown'}")
+        
+        # Death information
+        print(f"\nDEATH INFORMATION:")
+        current_age = person.calculate_age()
+        
+        # Enhanced deceased logic
+        if person.is_deceased():
+            print(f"  Is Deceased: Yes")
+            print(f"  Death Date: {person.death_date.strftime('%d %b %Y') if person.death_date else 'Unknown'}")
+            print(f"  Death Year: {person.death_year or 'Unknown'}")
+        elif current_age and current_age > 120:
+            print(f"  Is Deceased: Yes (assumed - age over 120)")
+            print(f"  Death Date: Unknown")
+            print(f"  Death Year: Unknown")
+        else:
+            print(f"  Is Deceased: No")
+            # Don't show death date/year for living people
+        
+        # Age information
+        print(f"  Age: {current_age or 'Unknown'}")
+        if current_age and current_age > 120:
+            print(f"  Note: Age over 120 suggests data error or person assumed deceased")
+        
+        # Family relationships
+        parents = self.get_parents_fast(person.xref_id)
+        spouses = self.get_spouses_fast(person.xref_id)
+        children = self.get_children_fast(person.xref_id)
+        siblings = self.get_siblings_fast(person.xref_id)
+        
+        print(f"\nFAMILY RELATIONSHIPS:")
+        print(f"  Parents: {len(parents)}")
+        for parent in parents:
+            print(f"    - {parent.name} (born {parent.birth_year or 'Unknown'})")
+        
+        print(f"  Spouses: {len(spouses)}")
+        for spouse in spouses:
+            print(f"    - {spouse.name} (born {spouse.birth_year or 'Unknown'})")
+        
+        print(f"  Children: {len(children)}")
+        for child in children:
+            print(f"    - {child.name} (born {child.birth_year or 'Unknown'})")
+        
+        print(f"  Siblings: {len(siblings)}")
+        for sibling in siblings:
+            print(f"    - {sibling.name} (born {sibling.birth_year or 'Unknown'})")
+        
+        # Occupations
+        occupations = person.get_occupations()
+        print(f"\nOCCUPATIONS:")
+        if occupations:
+            for i, occ in enumerate(occupations, 1):
+                print(f"  {i}. {occ['occupation']} (source: {occ['source']})")
+        else:
+            print("  None found")
+        
+        # Debug section for birth location fields
+        if show_debug:
+            print(f"\n" + "="*80)
+            print("DEBUG: BIRTH LOCATION ANALYSIS")
+            print("="*80)
+            
+            print(f"\nCURRENT birth_place PROPERTY:")
+            print(f"  Value: '{person.birth_place or 'None'}'")
+            print(f"  Source: BIRT > PLAC tag only")
+            
+            # Check for all possible birth location fields
+            birth_location_fields = []
+            
+            def extract_birth_locations(record, path="", depth=0):
+                if depth > 10:  # Prevent infinite recursion
+                    return
+                
+                if hasattr(record, 'sub_records'):
+                    for sub in record.sub_records:
+                        current_path = f"{path}/{sub.tag}" if path else sub.tag
+                        
+                        # Check if this is a birth event
+                        if sub.tag == 'BIRT':
+                            print(f"\n  Found BIRT event at {current_path}:")
+                            # Look for all sub-records under BIRT
+                            for birth_sub in getattr(sub, 'sub_records', []):
+                                birth_path = f"{current_path}/{birth_sub.tag}"
+                                value = getattr(birth_sub, 'value', None)
+                                print(f"    {birth_sub.tag}: {value}")
+                                
+                                if birth_sub.tag in ['PLAC', 'ADDR', 'NOTE'] and value:
+                                    birth_location_fields.append({
+                                        'path': birth_path,
+                                        'tag': birth_sub.tag,
+                                        'value': str(value)
+                                    })
+                                
+                                # Check for nested records (like source data)
+                                if hasattr(birth_sub, 'sub_records'):
+                                    for nested in birth_sub.sub_records:
+                                        nested_path = f"{birth_path}/{nested.tag}"
+                                        nested_value = getattr(nested, 'value', None)
+                                        if nested_value:
+                                            print(f"      {nested.tag}: {nested_value}")
+                                            if nested.tag in ['TEXT', 'DATA', 'NOTE'] and 'birth' in str(nested_value).lower():
+                                                birth_location_fields.append({
+                                                    'path': nested_path,
+                                                    'tag': nested.tag,
+                                                    'value': str(nested_value),
+                                                    'note': 'Contains birth keyword'
+                                                })
+                        
+                        # Check for SOUR records that might contain birth info
+                        elif sub.tag == 'SOUR' and sub.value:
+                            source_id = str(sub.value).strip()
+                            if source_id.startswith('@') and source_id.endswith('@'):
+                                source_record = self._source_index.get(source_id)
+                                if source_record:
+                                    print(f"\n  Checking source reference: {source_id}")
+                                    self._extract_source_birth_info(source_record, source_id, birth_location_fields)
+                        
+                        # Recursively check other records (but limit depth)
+                        if depth < 3:
+                            extract_birth_locations(sub, current_path, depth + 1)
+            
+            extract_birth_locations(person.raw_record)
+            
+            print(f"\n" + "="*50)
+            print("SUMMARY OF ALL BIRTH LOCATION FIELDS FOUND:")
+            print("="*50)
+            
+            if birth_location_fields:
+                for i, field in enumerate(birth_location_fields, 1):
+                    print(f"\n{i}. {field['tag']} field ({field['path']}):")
+                    print(f"   Value: {field['value']}")
+                    if 'note' in field:
+                        print(f"   Note: {field['note']}")
+            else:
+                print("\nNo additional birth location fields found beyond main PLAC field.")
+            
+            print(f"\n" + "="*50)
+            print("RECOMMENDATIONS:")
+            print("="*50)
+            
+            if len(birth_location_fields) > 1:
+                print("Multiple birth location fields found!")
+                print("Consider modifying the birth_place property to check these additional fields:")
+                for field in birth_location_fields[1:]:  # Skip first (current PLAC)
+                    print(f"  - {field['tag']} fields under BIRT events")
+                    print(f"  - Source document {field['tag']} fields")
+            else:
+                print("Only the standard BIRT > PLAC field contains birth location data.")
+                print("This is the expected/normal case for most GEDCOM files.")
+            
+            # Show complete raw record structure if requested
+            show_full_raw = input("\nShow complete raw GEDCOM structure? (y/N): ").strip().lower()
+            if show_full_raw == 'y':
+                print(f"\n" + "="*80)
+                print("COMPLETE RAW GEDCOM STRUCTURE:")
+                print("="*80)
+                
+                def show_record_structure(record, indent="  ", max_depth=8, current_depth=0):
+                    if current_depth >= max_depth:
+                        print(f"{indent}... (max depth reached)")
+                        return
+                    
+                    if hasattr(record, 'sub_records'):
+                        for sub in record.sub_records:
+                            tag = getattr(sub, 'tag', 'NO_TAG')
+                            value = getattr(sub, 'value', '')
+                            
+                            # Truncate very long values
+                            if isinstance(value, str) and len(value) > 100:
+                                display_value = value[:100] + "..."
+                            else:
+                                display_value = value
+                            
+                            print(f"{indent}{tag}: {display_value}")
+                            
+                            # Special handling for source references
+                            if tag == 'SOUR' and str(value).startswith('@'):
+                                source_id = str(value).strip()
+                                source_record = self._source_index.get(source_id)
+                                if source_record:
+                                    print(f"{indent}  [Resolved source {source_id}:]")
+                                    show_record_structure(source_record, indent + "    ", max_depth, current_depth + 1)
+                            else:
+                                show_record_structure(sub, indent + "  ", max_depth, current_depth + 1)
+                
+                show_record_structure(person.raw_record)
+        
+        print("="*80)
+        input("\nPress Enter to continue...")
+
+    def _extract_source_birth_info(self, source_record, source_id: str, birth_location_fields: list):
+        """Extract birth location information from a source record."""
+        def check_source_fields(record, path_prefix=""):
+            if hasattr(record, 'sub_records'):
+                for sub in record.sub_records:
+                    tag = getattr(sub, 'tag', 'NO_TAG')
+                    value = getattr(sub, 'value', '')
+                    current_path = f"{path_prefix}/{tag}" if path_prefix else tag
+                    
+                    # Check if this field might contain birth location info
+                    if tag in ['TEXT', 'DATA', 'NOTE', 'TITL', 'PAGE'] and value:
+                        value_str = str(value).lower()
+                        # Look for birth-related keywords and location indicators
+                        birth_keywords = ['birth', 'born', 'birthplace', 'birth place', 'place of birth']
+                        location_keywords = ['county', 'parish', 'district', 'town', 'city', 'village']
+                        
+                        has_birth_keyword = any(keyword in value_str for keyword in birth_keywords)
+                        has_location_keyword = any(keyword in value_str for keyword in location_keywords)
+                        
+                        if has_birth_keyword or (has_location_keyword and len(str(value)) < 200):
+                            birth_location_fields.append({
+                                'path': f"SOURCE_{source_id}/{current_path}",
+                                'tag': tag,
+                                'value': str(value),
+                                'note': f"Source field with {'birth' if has_birth_keyword else 'location'} keywords"
+                            })
+                            print(f"    {tag}: {str(value)[:100]}{'...' if len(str(value)) > 100 else ''}")
+                    
+                    # Recursively check sub-fields
+                    check_source_fields(sub, current_path)
+        
+        check_source_fields(source_record)
+
+
+
+
 
     # ============ CACHING METHODS ============
     
@@ -2219,13 +2517,8 @@ class Ged4PyGedcomDB(GedcomDB):
 
 
 
-
-
-
-
-
     def _get_geocoded_location(self, place_name: str, person_info: dict = None):
-        """Get geocoded location using enhanced UK-preference algorithm."""
+        """Get geocoded location using enhanced UK-preference algorithm with progressive left-trimming."""
         if not place_name or not place_name.strip():
             return None
         
@@ -2244,76 +2537,105 @@ class Ged4PyGedcomDB(GedcomDB):
             else:
                 return None
         
+        # Determine if this looks like a UK address (to guide preference logic)
+        uk_address_indicators = ['uk', 'england', 'wales', 'scotland', 'northern ireland', 'great britain', 'britain']
+        looks_like_uk_address = any(indicator in place_name.lower() for indicator in uk_address_indicators)
+        
         # Try geocoding with enhanced algorithm
         try:
             from geopy.geocoders import Nominatim
             import time
             
             geolocator = Nominatim(user_agent="family_tree_mapper_v1.0")
-            uk_indicators = ['united kingdom', 'uk', 'great britain', 'gb', 'england', 'wales', 'scotland', 'northern ireland']
+            uk_result_indicators = ['united kingdom', 'uk', 'great britain', 'gb', 'england', 'wales', 'scotland', 'northern ireland']
             
-            # Step 1: Try single result first
-            location = geolocator.geocode(place_name, timeout=15)
             chosen_location = None
             
-            if location:
-                # Check if single result is UK
-                address_lower = location.address.lower()
-                is_uk = any(indicator in address_lower for indicator in uk_indicators)
-                
-                if is_uk:
-                    # Single result is UK - use it!
+            # If it's not a comma-separated address, just try it once
+            if ',' not in place_name:
+                location = geolocator.geocode(place_name, timeout=15)
+                if location:
                     chosen_location = location
-                else:
-                    # Single result is NOT UK - check for multiple results
-                    pass  # Will fall through to multiple results check
-            
-            # Step 2: If single result wasn't UK or didn't exist, try multiple results
-            if not chosen_location:
-                locations = geolocator.geocode(place_name, exactly_one=False, timeout=15)
+            else:
+                # Progressive left-trimming for comma-separated addresses
+                place_parts = [p.strip() for p in place_name.split(',') if p.strip()]
                 
-                if locations:
-                    uk_locations = []
+                for attempt in range(len(place_parts)):
+                    # Create query by joining remaining parts (from attempt index onwards)
+                    remaining_parts = place_parts[attempt:]
+                    query = ', '.join(remaining_parts)
                     
-                    # Filter UK locations
-                    for loc in locations:
-                        address_lower = loc.address.lower()
-                        is_uk = any(indicator in address_lower for indicator in uk_indicators)
-                        if is_uk:
-                            uk_locations.append(loc)
-                    
-                    # Step 3: Process UK results
-                    if uk_locations:
-                        if len(uk_locations) == 1:
-                            # Single UK location - use it
-                            chosen_location = uk_locations[0]
-                        else:
-                            # Multiple UK locations - check places config
-                            places_config_match = self._find_places_config_match(place_name, uk_locations)
+                    try:
+                        # Try single result first
+                        location = geolocator.geocode(query, timeout=15)
+                        
+                        if location:
+                            # Check if single result is UK
+                            address_lower = location.address.lower()
+                            is_uk_result = any(indicator in address_lower for indicator in uk_result_indicators)
                             
-                            if places_config_match:
-                                chosen_location = places_config_match
+                            # Accept single result if:
+                            # 1. It's UK and we expect UK, OR
+                            # 2. We don't expect UK (so any result is fine)
+                            if (is_uk_result and looks_like_uk_address) or not looks_like_uk_address:
+                                chosen_location = location
+                                break
                             else:
-                                # No places config match - use first UK location
-                                chosen_location = uk_locations[0]
-                    else:
-                        # No UK locations in multiple results
-                        if location:  # Use original single result if it existed
-                            chosen_location = location
-                        elif locations:  # Use first multiple result
-                            chosen_location = locations[0]
-                else:
-                    # No multiple results found
-                    if location:  # Use original single result if it existed
-                        chosen_location = location
+                                # Single result is not UK but we expect UK, check multiple results
+                                pass
+                        
+                        # Try multiple results if single wasn't suitable or didn't exist
+                        if not chosen_location:
+                            locations = geolocator.geocode(query, exactly_one=False, timeout=15)
+                            
+                            if locations:
+                                uk_locations = []
+                                non_uk_locations = []
+                                
+                                for loc in locations:
+                                    # Check if this looks like UK
+                                    address_lower = loc.address.lower()
+                                    is_uk_result = any(indicator in address_lower for indicator in uk_result_indicators)
+                                    
+                                    if is_uk_result:
+                                        uk_locations.append(loc)
+                                    else:
+                                        non_uk_locations.append(loc)
+                                
+                                # Choose based on whether we expect a UK address
+                                if looks_like_uk_address:
+                                    # We expect UK - prefer UK results if available
+                                    if uk_locations:
+                                        chosen_location = uk_locations[0]
+                                        break
+                                    elif non_uk_locations:
+                                        # No UK results but we have others - continue trying shorter address parts
+                                        continue
+                                    else:
+                                        # No results at all - continue
+                                        continue
+                                else:
+                                    # We don't expect UK - any result is fine, prefer first available
+                                    if locations:
+                                        chosen_location = locations[0]
+                                        break
+                            else:
+                                # No multiple results either - continue to next attempt
+                                continue
+                        
+                        time.sleep(1)  # Rate limiting between attempts
+                        
+                    except Exception as e:
+                        print(f"Error geocoding '{query}': {e}")
+                        continue
             
-            # Step 4: Cache and return the chosen location
+            # Cache and return the chosen location
             if chosen_location:
                 cache_entry = {
                     'lat': chosen_location.latitude,
                     'lng': chosen_location.longitude,
                     'cached_date': datetime.now().isoformat(),
-                    'source': 'nominatim_enhanced_uk_preference',
+                    'source': 'nominatim_enhanced_progressive',
                     'geocoded_address': chosen_location.address
                 }
                 self._geocoding_cache[place_key] = cache_entry
@@ -2326,14 +2648,125 @@ class Ged4PyGedcomDB(GedcomDB):
                     'source': 'geocoded'
                 }
             
-            # Step 5: If everything failed, try the old smart part matching as fallback
-            return self._fallback_smart_part_matching(place_name, person_info, geolocator, uk_indicators)
+            # If everything failed, cache the failure
+            self._geocoding_cache[place_key] = {
+                'lat': None,
+                'lng': None,
+                'cached_date': datetime.now().isoformat(),
+                'source': 'failed_enhanced_progressive'
+            }
+            
+            if person_info:
+                print(f"  ✗ Could not geocode '{place_name}' for {person_info.get('name', 'Unknown')} (born {person_info.get('birth_year', 'Unknown')})")
+            
+            return None
             
         except Exception as e:
             print(f"Error in enhanced geocoding for '{place_name}': {e}")
             if person_info:
                 print(f"   → Person: {person_info.get('name', 'Unknown')} (born {person_info.get('birth_year', 'Unknown')})")
             return None
+
+
+
+
+    def _check_places_config_for_uk_enhancement(self, address: str) -> str:
+        """Check if the last part of an address is a UK place in places_config and enhance it."""
+        try:
+            places_config_file = self._base_dir / 'places_config.json'
+            
+            if not places_config_file.exists():
+                return address
+            
+            with open(places_config_file, 'r', encoding='utf-8') as f:
+                places_config = json.load(f)
+            
+            # Get the last part of the address (most general location)
+            parts = [p.strip() for p in address.split(',') if p.strip()]
+            if not parts:
+                return address
+            
+            last_part = parts[-1].lower()
+            
+            # Check if last part is a country first
+            nation_places = places_config.get('nation_places', {})
+            for country, places in nation_places.items():
+                if country.lower() == last_part:
+                    # It's already a country, don't enhance
+                    return address
+            
+            # Check if last part is a UK county/place and find which nation it belongs to
+            nation_counties = places_config.get('nation_counties', {})
+            
+            # Check if it's a county in England/Wales/Scotland
+            for nation, counties in nation_counties.items():
+                if isinstance(counties, list):
+                    for county in counties:
+                        # Handle slash-separated counties
+                        if '/' in county:
+                            county_variants = [c.strip().lower() for c in county.split('/')]
+                            if last_part in county_variants:
+                                # Found it! Enhance with the correct nation
+                                enhanced_address = f"{address}, {nation}"
+                                return enhanced_address
+                        else:
+                            if county.lower() == last_part:
+                                # Found it! Enhance with the correct nation
+                                enhanced_address = f"{address}, {nation}"
+                                return enhanced_address
+            
+            # Check county_places for sub-locations
+            county_places = places_config.get('county_places', {})
+            for county, places in county_places.items():
+                if isinstance(places, list):
+                    for place in places:
+                        # Handle slash-separated places
+                        if '/' in place:
+                            place_variants = [p.strip().lower() for p in place.split('/')]
+                            if last_part in place_variants:
+                                # Found in a county - need to find which nation this county is in
+                                county_lower = county.lower()
+                                for nation, counties in nation_counties.items():
+                                    if isinstance(counties, list):
+                                        for nation_county in counties:
+                                            if '/' in nation_county:
+                                                nation_county_variants = [c.strip().lower() for c in nation_county.split('/')]
+                                                if county_lower in nation_county_variants:
+                                                    enhanced_address = f"{address}, {county}, {nation}"
+                                                    return enhanced_address
+                                            else:
+                                                if nation_county.lower() == county_lower:
+                                                    enhanced_address = f"{address}, {county}, {nation}"
+                                                    return enhanced_address
+                        else:
+                            if place.lower() == last_part:
+                                # Found in a county - need to find which nation this county is in
+                                county_lower = county.lower()
+                                for nation, counties in nation_counties.items():
+                                    if isinstance(counties, list):
+                                        for nation_county in counties:
+                                            if '/' in nation_county:
+                                                nation_county_variants = [c.strip().lower() for c in nation_county.split('/')]
+                                                if county_lower in nation_county_variants:
+                                                    enhanced_address = f"{address}, {county}, {nation}"
+                                                    return enhanced_address
+                                            else:
+                                                if nation_county.lower() == county_lower:
+                                                    enhanced_address = f"{address}, {county}, {nation}"
+                                                    return enhanced_address
+            
+            # If we get here, the last part wasn't found in UK places config
+            return address
+            
+        except Exception as e:
+            print(f"Error checking places config for UK enhancement: {e}")
+            return address
+
+
+
+
+
+
 
     def _fallback_smart_part_matching(self, place_name: str, person_info: dict, geolocator, uk_indicators):
         """Fallback to smart part matching when full address methods fail."""
@@ -2489,14 +2922,6 @@ class Ged4PyGedcomDB(GedcomDB):
 
 
 
-
-
-
-
-
-
-
-
     def _find_uk_location_in_results(self, locations) -> object:
         """Find UK location among multiple geocoding results."""
         uk_indicators = [
@@ -2511,13 +2936,6 @@ class Ged4PyGedcomDB(GedcomDB):
                 return location
         
         return None
-
-
-
-
-
-
-
 
 
 
@@ -3377,152 +3795,383 @@ class Ged4PyGedcomDB(GedcomDB):
             print("No address entered.")
             return
         
+        # Ask if user wants detailed debugging
+        debug_choice = input("Show detailed debugging output? (Y/n): ").strip().lower()
+        show_debug = debug_choice != 'n'  # Default is yes
+        
         print(f"\nTesting address: '{address}'")
         print("-" * 60)
         
-        # Test with enhanced algorithm
+        # Use the SAME enhanced geocoding function as the main system
+        person_info = {
+            'name': 'Test Person',
+            'birth_year': 'Test'
+        }
+        
+        if show_debug:
+            print("Using main geocoding function with debug output enabled...")
+        
+        # Call the main geocoding function
+        location_data = self._get_geocoded_location_with_debug(address, person_info, show_debug)
+        
+        # Display result
+        if location_data:
+            print(f"\n" + "="*60)
+            print("FINAL CHOSEN LOCATION:")
+            print(f"Coordinates: {location_data['latitude']:.6f}, {location_data['longitude']:.6f}")
+            print(f"Source: {location_data['source']}")
+            print("="*60)
+            
+            # Create a simple map
+            try:
+                import folium
+                
+                # Create Folium map
+                m = folium.Map(location=[location_data['latitude'], location_data['longitude']], zoom_start=12)
+                
+                # Add marker
+                popup_html = f"""
+                <b>Test Address</b><br/>
+                <i>{address}</i><br/>
+                <br/>Coordinates: {location_data['latitude']:.6f}, {location_data['longitude']:.6f}<br/>
+                Source: {location_data['source']}
+                """
+                
+                folium.Marker(
+                    [location_data['latitude'], location_data['longitude']],
+                    popup=folium.Popup(popup_html, max_width=300),
+                    tooltip=f"Test: {address}",
+                    icon=folium.Icon(color='green', icon='info-sign')
+                ).add_to(m)
+                
+                # Save and open map
+                filename = "test_single_address.html"
+                m.save(filename)
+                
+                print(f"   ✅ Map created: {filename}")
+                
+                import webbrowser
+                import os
+                webbrowser.open('file://' + os.path.abspath(filename))
+                
+            except ImportError:
+                print("   Folium not available for mapping")
+        else:
+            print(f"\n✗ FAILED: No location could be determined for '{address}'")
+        
+        input("\nPress Enter to continue...")
+
+    def _get_geocoded_location_with_debug(self, place_name: str, person_info: dict = None, show_debug: bool = False):
+        """Enhanced geocoding with debug output - mirrors the main function but with optional debug prints."""
+        if not place_name or not place_name.strip():
+            return None
+        
+        place_key = place_name.strip()
+        
+        # Direct cache match first
+        if place_key in self._geocoding_cache:
+            cached_data = self._geocoding_cache[place_key]
+            
+            if cached_data.get('lat') is not None and cached_data.get('lng') is not None:
+                if show_debug:
+                    print(f"✓ Found in cache: {cached_data.get('geocoded_address', 'Unknown address')}")
+                return {
+                    'latitude': cached_data['lat'],
+                    'longitude': cached_data['lng'],
+                    'source': 'cache'
+                }
+            else:
+                if show_debug:
+                    print(f"✗ Found failed lookup in cache")
+                return None
+        
+        # Determine if this looks like a UK address (to guide preference logic)
+        uk_address_indicators = ['uk', 'england', 'wales', 'scotland', 'northern ireland', 'great britain', 'britain']
+        looks_like_uk_address = any(indicator in place_name.lower() for indicator in uk_address_indicators)
+        
+        if show_debug:
+            print(f"Address analysis: {'Looks like UK address' if looks_like_uk_address else 'Not obviously UK address'}")
+        
+        # Try geocoding with enhanced algorithm
         try:
             from geopy.geocoders import Nominatim
             import time
             
             geolocator = Nominatim(user_agent="family_tree_mapper_v1.0")
-            
-            # Step 1: Try single result first
-            print(f"1. Testing SINGLE RESULT: '{address}'")
-            location = geolocator.geocode(address, timeout=15)
+            uk_result_indicators = ['united kingdom', 'uk', 'great britain', 'gb', 'england', 'wales', 'scotland', 'northern ireland']
             
             chosen_location = None
             
-            if location:
-                print(f"   ✓ SINGLE RESULT: {location.address}")
-                print(f"   Coordinates: {location.latitude:.6f}, {location.longitude:.6f}")
+            # If it's not a comma-separated address, just try it once
+            if ',' not in place_name:
+                if show_debug:
+                    print(f"\nSTEP 1: Single place name - trying '{place_name}'")
                 
-                # Check if single result is UK
-                address_lower = location.address.lower()
-                uk_indicators = ['united kingdom', 'uk', 'great britain', 'gb', 'england', 'wales', 'scotland', 'northern ireland']
-                is_uk = any(indicator in address_lower for indicator in uk_indicators)
-                print(f"   UK?: {'YES' if is_uk else 'NO'}")
-                
-                if is_uk:
-                    print("   → Single result is UK, using it!")
-                    chosen_location = location
-                else:
-                    print("   → Single result is NOT UK, checking for multiple results...")
-            else:
-                print(f"   ✗ No single result found")
-            
-            # Step 2: If single result wasn't UK or didn't exist, try multiple results
-            if not chosen_location:
-                print(f"\n2. Testing MULTIPLE RESULTS: '{address}'")
-                locations = geolocator.geocode(address, exactly_one=False, timeout=15)
-                
-                if locations:
-                    print(f"   Found {len(locations)} total results:")
-                    uk_locations = []
+                location = geolocator.geocode(place_name, timeout=15)
+                if location:
+                    if show_debug:
+                        print(f"   ✓ SINGLE RESULT: {location.address}")
+                        print(f"   Coordinates: {location.latitude:.6f}, {location.longitude:.6f}")
                     
-                    for i, loc in enumerate(locations, 1):
-                        print(f"   {i:2}. {loc.address}")
-                        print(f"       Coords: {loc.latitude:.6f}, {loc.longitude:.6f}")
-                        
-                        # Check if this looks like UK
-                        address_lower = loc.address.lower()
-                        is_uk = any(indicator in address_lower for indicator in uk_indicators)
-                        print(f"       UK?: {'YES' if is_uk else 'NO'}")
-                        
-                        if is_uk:
-                            uk_locations.append(loc)
-                        print()
+                    # Check if single result is UK
+                    address_lower = location.address.lower()
+                    is_uk_result = any(indicator in address_lower for indicator in uk_result_indicators)
+                    if show_debug:
+                        print(f"   UK result?: {'YES' if is_uk_result else 'NO'}")
                     
-                    # Step 3: Process UK results
-                    if uk_locations:
-                        print(f"   Found {len(uk_locations)} UK locations!")
-                        
-                        if len(uk_locations) == 1:
-                            print("   → Using single UK location")
-                            chosen_location = uk_locations[0]
-                        else:
-                            print("   → Multiple UK locations, checking places config...")
-                            
-                            # Step 4: Check against places config
-                            places_config_match = self._find_places_config_match(address, uk_locations)
-                            
-                            if places_config_match:
-                                print(f"   → Found places config match: {places_config_match.address}")
-                                chosen_location = places_config_match
+                    # If we got non-UK result but the place might be UK, check places_config
+                    if not is_uk_result and not looks_like_uk_address:
+                        if show_debug:
+                            print(f"   → Non-UK result for non-UK-indicated address, checking places_config...")
+                        enhanced_address = self._check_places_config_for_uk_enhancement(place_name)
+                        if enhanced_address and enhanced_address != place_name:
+                            if show_debug:
+                                print(f"   → Trying enhanced address: '{enhanced_address}' (found '{place_name}' in UK places config)")
+                            enhanced_location = geolocator.geocode(enhanced_address, timeout=15)
+                            if enhanced_location:
+                                enhanced_address_lower = enhanced_location.address.lower()
+                                if any(indicator in enhanced_address_lower for indicator in uk_result_indicators):
+                                    if show_debug:
+                                        print(f"   ✓ Enhanced address gave UK result: {enhanced_location.address}")
+                                    chosen_location = enhanced_location
+                                else:
+                                    if show_debug:
+                                        print(f"   → Enhanced address didn't give UK result, using original")
+                                    chosen_location = location
                             else:
-                                print("   → No places config match, using first UK location")
-                                chosen_location = uk_locations[0]
-                    else:
-                        print("   → No UK locations in multiple results")
-                        if location:  # Use original single result if it existed
-                            print("   → Falling back to original single result")
+                                if show_debug:
+                                    print(f"   → Enhanced address failed, using original")
+                                chosen_location = location
+                        else:
+                            if show_debug:
+                                print(f"   → '{place_name}' not found in UK places config, using original result")
                             chosen_location = location
-                        elif locations:  # Use first multiple result
-                            print("   → Using first multiple result")
-                            chosen_location = locations[0]
-                else:
-                    print(f"   ✗ No multiple results found")
-                    if location:  # Use original single result if it existed
-                        print("   → Falling back to original single result")
+                    else:
                         chosen_location = location
-            
-            # Step 5: Final result
-            if chosen_location:
-                print(f"\n" + "="*60)
-                print("FINAL CHOSEN LOCATION:")
-                print(f"Address: {chosen_location.address}")
-                print(f"Coordinates: {chosen_location.latitude:.6f}, {chosen_location.longitude:.6f}")
-                
-                # Check if final result is UK
-                address_lower = chosen_location.address.lower()
-                is_uk = any(indicator in address_lower for indicator in uk_indicators)
-                print(f"Is UK: {'YES' if is_uk else 'NO'}")
-                print("="*60)
-                
-                # Create a simple map
-                try:
-                    import folium
-                    
-                    # Create Folium map
-                    m = folium.Map(location=[chosen_location.latitude, chosen_location.longitude], zoom_start=12)
-                    
-                    # Add marker
-                    popup_html = f"""
-                    <b>Test Address</b><br/>
-                    <i>{address}</i><br/>
-                    <br/>Final Result: {chosen_location.address}<br/>
-                    Coordinates: {chosen_location.latitude:.6f}, {chosen_location.longitude:.6f}<br/>
-                    UK Location: {'YES' if is_uk else 'NO'}
-                    """
-                    
-                    folium.Marker(
-                        [chosen_location.latitude, chosen_location.longitude],
-                        popup=folium.Popup(popup_html, max_width=300),
-                        tooltip=f"Test: {address}",
-                        icon=folium.Icon(color='green' if is_uk else 'red', icon='info-sign')
-                    ).add_to(m)
-                    
-                    # Save and open map
-                    filename = "test_single_address.html"
-                    m.save(filename)
-                    
-                    print(f"   ✅ Map created: {filename}")
-                    
-                    import webbrowser
-                    import os
-                    webbrowser.open('file://' + os.path.abspath(filename))
-                    
-                except ImportError:
-                    print("   Folium not available for mapping")
+                else:
+                    if show_debug:
+                        print(f"   ✗ No result for '{place_name}'")
             else:
-                print(f"\n✗ FAILED: No location could be determined for '{address}'")
+                # Progressive left-trimming for comma-separated addresses
+                place_parts = [p.strip() for p in place_name.split(',') if p.strip()]
+                
+                if show_debug:
+                    print(f"\nAddress parts: {place_parts}")
+                    print(f"Will try {len(place_parts)} combinations (removing leftmost parts progressively)")
+                
+                for attempt in range(len(place_parts)):
+                    # Create query by joining remaining parts (from attempt index onwards)
+                    remaining_parts = place_parts[attempt:]
+                    query = ', '.join(remaining_parts)
+                    
+                    if show_debug:
+                        print(f"\nSTEP {attempt + 1}: Trying '{query}'")
+                    
+                    try:
+                        # Try single result first
+                        location = geolocator.geocode(query, timeout=15)
+                        
+                        if location:
+                            if show_debug:
+                                print(f"   ✓ SINGLE RESULT: {location.address}")
+                                print(f"   Coordinates: {location.latitude:.6f}, {location.longitude:.6f}")
+                            
+                            # Check if single result is UK
+                            address_lower = location.address.lower()
+                            is_uk_result = any(indicator in address_lower for indicator in uk_result_indicators)
+                            if show_debug:
+                                print(f"   UK result?: {'YES' if is_uk_result else 'NO'}")
+                            
+                            # Accept single result if it matches expectation OR check places_config
+                            if (is_uk_result and looks_like_uk_address) or not looks_like_uk_address:
+                                # If we don't expect UK but got non-UK, check places config
+                                if not is_uk_result and not looks_like_uk_address:
+                                    if show_debug:
+                                        print(f"   → Non-UK result, checking if '{remaining_parts[-1]}' is in UK places config...")
+                                    enhanced_address = self._check_places_config_for_uk_enhancement(query)
+                                    if enhanced_address and enhanced_address != query:
+                                        if show_debug:
+                                            print(f"   → Trying enhanced address: '{enhanced_address}' (found '{remaining_parts[-1]}' in UK places config)")
+                                        enhanced_location = geolocator.geocode(enhanced_address, timeout=15)
+                                        if enhanced_location:
+                                            enhanced_address_lower = enhanced_location.address.lower()
+                                            if any(indicator in enhanced_address_lower for indicator in uk_result_indicators):
+                                                if show_debug:
+                                                    print(f"   ✓ Enhanced address gave UK result: {enhanced_location.address}")
+                                                chosen_location = enhanced_location
+                                                break
+                                            else:
+                                                if show_debug:
+                                                    print(f"   → Enhanced address didn't give UK result, using original")
+                                                chosen_location = location
+                                                break
+                                        else:
+                                            if show_debug:
+                                                print(f"   → Enhanced address failed, using original")
+                                            chosen_location = location
+                                            break
+                                    else:
+                                        if show_debug:
+                                            print(f"   → '{remaining_parts[-1]}' not found in UK places config, using original result")
+                                        chosen_location = location
+                                        break
+                                else:
+                                    if show_debug:
+                                        reason = "UK result for UK address" if (is_uk_result and looks_like_uk_address) else "acceptable result"
+                                        print(f"   → Using single result ({reason})")
+                                    chosen_location = location
+                                    break
+                            else:
+                                if show_debug:
+                                    print("   → Single result is not UK but we expect UK, checking multiple results...")
+                        else:
+                            if show_debug:
+                                print(f"   ✗ No single result")
+                        
+                        # Try multiple results if single wasn't suitable or didn't exist
+                        if not chosen_location:
+                            locations = geolocator.geocode(query, exactly_one=False, timeout=15)
+                            
+                            if locations:
+                                if show_debug:
+                                    print(f"   Found {len(locations)} multiple results:")
+                                
+                                uk_locations = []
+                                non_uk_locations = []
+                                
+                                for i, loc in enumerate(locations, 1):
+                                    if show_debug:
+                                        print(f"   {i:2}. {loc.address}")
+                                    
+                                    # Check if this looks like UK
+                                    address_lower = loc.address.lower()
+                                    is_uk_result = any(indicator in address_lower for indicator in uk_result_indicators)
+                                    if show_debug:
+                                        print(f"       UK result?: {'YES' if is_uk_result else 'NO'}")
+                                    
+                                    if is_uk_result:
+                                        uk_locations.append(loc)
+                                    else:
+                                        non_uk_locations.append(loc)
+                                
+                                # Choose based on whether we expect a UK address
+                                if looks_like_uk_address:
+                                    # We expect UK - prefer UK results if available
+                                    if uk_locations:
+                                        chosen_location = uk_locations[0]
+                                        if show_debug:
+                                            print(f"   → Using UK result for UK address: {chosen_location.address}")
+                                        break
+                                    elif non_uk_locations:
+                                        # No UK results but we have others - continue trying shorter address parts
+                                        if show_debug:
+                                            print(f"   → No UK results for UK address, trying shorter parts...")
+                                        continue
+                                    else:
+                                        if show_debug:
+                                            print(f"   → No results at all")
+                                        continue
+                                else:
+                                    # We don't expect UK - any result is fine, BUT check places config first
+                                    if non_uk_locations and not uk_locations:
+                                        # We have non-UK results but no UK ones - check places config
+                                        if show_debug:
+                                            print(f"   → Multiple non-UK results, checking if '{remaining_parts[-1]}' is in UK places config...")
+                                        enhanced_address = self._check_places_config_for_uk_enhancement(query)
+                                        if enhanced_address and enhanced_address != query:
+                                            if show_debug:
+                                                print(f"   → Trying enhanced address: '{enhanced_address}' (found '{remaining_parts[-1]}' in UK places config)")
+                                            enhanced_location = geolocator.geocode(enhanced_address, timeout=15)
+                                            if enhanced_location:
+                                                enhanced_address_lower = enhanced_location.address.lower()
+                                                if any(indicator in enhanced_address_lower for indicator in uk_result_indicators):
+                                                    if show_debug:
+                                                        print(f"   ✓ Enhanced address gave UK result: {enhanced_location.address}")
+                                                    chosen_location = enhanced_location
+                                                    break
+                                                else:
+                                                    if show_debug:
+                                                        print(f"   → Enhanced address didn't give UK result, using first original result")
+                                                    chosen_location = locations[0]
+                                                    break
+                                            else:
+                                                if show_debug:
+                                                    print(f"   → Enhanced address failed, using first original result")
+                                                chosen_location = locations[0]
+                                                break
+                                        else:
+                                            if show_debug:
+                                                print(f"   → '{remaining_parts[-1]}' not found in UK places config, using first result")
+                                            chosen_location = locations[0]
+                                            break
+                                    else:
+                                        # We have UK results or mixed results - prefer UK if available
+                                        if uk_locations:
+                                            chosen_location = uk_locations[0]
+                                            if show_debug:
+                                                print(f"   → Using UK result: {chosen_location.address}")
+                                        else:
+                                            chosen_location = locations[0]
+                                            if show_debug:
+                                                print(f"   → Using first result: {chosen_location.address}")
+                                        break
+                            else:
+                                if show_debug:
+                                    print(f"   ✗ No multiple results either")
+                                continue
+                        
+                        time.sleep(1)  # Rate limiting between attempts
+                        
+                    except Exception as e:
+                        if show_debug:
+                            print(f"   ✗ Error with query '{query}': {e}")
+                        continue
+                
+                # If we went through all parts and still nothing
+                if not chosen_location:
+                    if show_debug:
+                        print(f"\n   ✗ All {len(place_parts)} attempts failed")
+            
+            # Cache and return the chosen location
+            if chosen_location:
+                cache_entry = {
+                    'lat': chosen_location.latitude,
+                    'lng': chosen_location.longitude,
+                    'cached_date': datetime.now().isoformat(),
+                    'source': 'nominatim_enhanced_progressive_with_config_debug',
+                    'geocoded_address': chosen_location.address
+                }
+                self._geocoding_cache[place_key] = cache_entry
+                
+                time.sleep(1)  # Rate limiting
+                
+                return {
+                    'latitude': chosen_location.latitude,
+                    'longitude': chosen_location.longitude,
+                    'source': 'geocoded'
+                }
+            
+            # If everything failed, cache the failure
+            self._geocoding_cache[place_key] = {
+                'lat': None,
+                'lng': None,
+                'cached_date': datetime.now().isoformat(),
+                'source': 'failed_enhanced_progressive_with_config_debug'
+            }
+            
+            if show_debug:
+                print(f"✗ Could not geocode '{place_name}'")
+            
+            return None
             
         except Exception as e:
-            print(f"Error during geocoding test: {e}")
-            input("\nPress Enter to continue...")
-            return
-        
-        input("\nPress Enter to continue...")
+            if show_debug:
+                print(f"Error in enhanced geocoding for '{place_name}': {e}")
+            return None
+
+
+
+
 
     def _find_places_config_match(self, original_address: str, uk_locations: list) -> object:
         """Check if any UK locations match places from our places config."""
@@ -3621,3 +4270,445 @@ class Ged4PyGedcomDB(GedcomDB):
         print(f"CSV exported: {filename}")
         print("You can import this into Google My Maps, QGIS, or other mapping tools.")
         return filename
+
+
+
+
+
+    def find_potential_duplicates(self):
+        """Find potential duplicate individuals based on name similarity and date proximity."""
+        print("\n=== Potential Duplicate Detection ===\n")
+        
+        # Use ancestor filter if present
+        if hasattr(self, "ancestor_filter_ids") and self.ancestor_filter_ids:
+            individuals = [self._individual_index[xref_id] for xref_id in self.ancestor_filter_ids if xref_id in self._individual_index]
+            tree_context = f"current ancestry tree ({len(self.ancestor_filter_ids)} individuals)"
+        else:
+            individuals = list(self._individual_index.values())
+            tree_context = f"entire database ({len(individuals)} individuals)"
+        
+        print(f"Analyzing {tree_context} for potential duplicates...")
+        
+        # Configuration options (removed loose)
+        print("\nDuplicate detection settings:")
+        print("1. Strict matching (very similar names, close dates)")
+        print("2. Standard matching (similar names, reasonable date proximity)")
+        
+        while True:
+            choice = input("\nSelect detection level (1-2): ").strip()
+            if choice in ['1', '2']:
+                break
+            print("Please enter 1 or 2.")
+        
+        # Set thresholds based on choice
+        if choice == '1':
+            name_threshold = 0.9  # Very similar names
+            date_threshold = 2    # Within 2 years
+            description = "Strict"
+        else:  # choice == '2'
+            name_threshold = 0.8  # Similar names
+            date_threshold = 5    # Within 5 years
+            description = "Standard"
+        
+        print(f"\nUsing {description} matching:")
+        print(f"  - Name similarity threshold: {name_threshold}")
+        print(f"  - Date proximity threshold: ±{date_threshold} years")
+        print(f"  - Analyzing {len(individuals)} individuals...\n")
+        
+        # Pre-filter individuals to only those with names and reasonable birth years
+        candidates = []
+        for ind in individuals:
+            if (ind.name and 
+                len(ind.name.strip()) > 3 and  # Skip very short names
+                (not ind.birth_year or 1400 <= ind.birth_year <= 2100)):  # Reasonable birth years only
+                candidates.append(ind)
+        
+        print(f"  - Filtered to {len(candidates)} candidates (removed short names, unreasonable dates)")
+        
+        # Pre-calculate family relationships for fast lookup
+        print("  - Building family relationship cache...")
+        parent_cache = {}
+        sibling_cache = {}
+        
+        for person in candidates:
+            parents = self.get_parents_fast(person.xref_id)
+            parent_cache[person.xref_id] = {p.xref_id for p in parents}
+            
+            # Get siblings through shared parents
+            siblings = set()
+            for parent in parents:
+                for child in self.get_children_fast(parent.xref_id):
+                    if child.xref_id != person.xref_id:
+                        siblings.add(child.xref_id)
+            sibling_cache[person.xref_id] = siblings
+        
+        # Find duplicates with optimized comparison
+        duplicates = []
+        total_comparisons = len(candidates) * (len(candidates) - 1) // 2
+        comparisons_done = 0
+        
+        print(f"  - Starting {total_comparisons:,} comparisons...")
+        
+        for i, person1 in enumerate(candidates):
+            # Progress update every 1000 comparisons or 10% intervals
+            if comparisons_done % 1000 == 0 or comparisons_done % (total_comparisons // 10) == 0:
+                progress = (comparisons_done / total_comparisons) * 100
+                print(f"    Progress: {progress:.1f}% ({comparisons_done:,}/{total_comparisons:,})")
+            
+            for person2 in candidates[i+1:]:
+                comparisons_done += 1
+                
+                # Quick name similarity check first (fastest filter)
+                name_similarity = self._calculate_name_similarity(person1.name, person2.name)
+                if name_similarity < name_threshold:
+                    continue  # Skip if names not similar enough
+                
+                # Family relationship checks
+                person1_parents = parent_cache[person1.xref_id]
+                person2_parents = parent_cache[person2.xref_id]
+                
+                # Skip if they have same parents but ages don't overlap (child mortality reuse)
+                if person1_parents and person2_parents and person1_parents == person2_parents:
+                    # Same parents - check if ages overlap (accounting for uncertainty)
+                    if not self._ages_overlap(person1, person2, tolerance=5):
+                        continue  # Skip - likely name reuse after child death
+                
+                # Skip if they are cousins (one's parent is sibling of other's parent)
+                if self._are_cousins(person1_parents, person2_parents, sibling_cache):
+                    continue
+                
+                # Date proximity check (more expensive)
+                date_proximity_score, date_details = self._calculate_date_proximity(person1, person2, date_threshold)
+                
+                if date_proximity_score > 0:  # Any date match within threshold
+                    duplicate_entry = {
+                        'person1': person1,
+                        'person2': person2,
+                        'name_similarity': name_similarity,
+                        'date_proximity': date_proximity_score,
+                        'date_details': date_details,
+                        'confidence': self._calculate_confidence_score(name_similarity, date_proximity_score)
+                    }
+                    duplicates.append(duplicate_entry)
+        
+        print(f"Analysis complete.\n")
+        
+        if not duplicates:
+            print(f"✅ No potential duplicates found with {description.lower()} matching criteria.")
+            input("\nPress Enter to continue...")
+            return
+        
+        # Sort by confidence score (highest first)
+        duplicates.sort(key=lambda x: x['confidence'], reverse=True)
+        
+        print(f"❌ Found {len(duplicates)} potential duplicate pair(s):\n")
+        print("=" * 80)
+        
+        # Display results (same as before)
+        for i, dup in enumerate(duplicates, 1):
+            person1 = dup['person1']
+            person2 = dup['person2']
+            confidence = dup['confidence']
+            name_sim = dup['name_similarity']
+            date_details = dup['date_details']
+            
+            # Format dates for display
+            def format_person_dates(person):
+                birth = "Unknown"
+                death = "Unknown"
+                
+                if person.birth_date:
+                    birth = person.birth_date.strftime('%d %b %Y')
+                elif person.birth_year:
+                    birth = str(person.birth_year)
+                
+                if person.death_date:
+                    death = person.death_date.strftime('%d %b %Y')
+                elif person.death_year:
+                    death = str(person.death_year)
+                elif not person.is_deceased():
+                    death = "Living"
+                
+                return birth, death
+            
+            birth1, death1 = format_person_dates(person1)
+            birth2, death2 = format_person_dates(person2)
+            
+            # Confidence level description
+            if confidence >= 0.9:
+                conf_desc = "Very High"
+            elif confidence >= 0.8:
+                conf_desc = "High"
+            elif confidence >= 0.7:
+                conf_desc = "Medium"
+            else:
+                conf_desc = "Low"
+            
+            print(f"Potential Duplicate #{i} - Confidence: {conf_desc} ({confidence:.2f})")
+            print(f"  Name Similarity: {name_sim:.2f}")
+            print()
+            print(f"  Person A: {person1.name} [{person1.xref_id}]")
+            print(f"    Born: {birth1} | Died: {death1}")
+            print(f"    Birth Place: {person1.birth_place or 'Unknown'}")
+            print()
+            print(f"  Person B: {person2.name} [{person2.xref_id}]")
+            print(f"    Born: {birth2} | Died: {death2}")
+            print(f"    Birth Place: {person2.birth_place or 'Unknown'}")
+            print()
+            print(f"  Date Analysis: {date_details}")
+            print()
+            
+            # Show family connections to help distinguish
+            parents1 = self.get_parents_fast(person1.xref_id)
+            parents2 = self.get_parents_fast(person2.xref_id)
+            
+            if parents1 or parents2:
+                print(f"  Family Context:")
+                if parents1:
+                    parent_names = [p.name for p in parents1]
+                    print(f"    Person A parents: {', '.join(parent_names)}")
+                else:
+                    print(f"    Person A parents: Unknown")
+                
+                if parents2:
+                    parent_names = [p.name for p in parents2]
+                    print(f"    Person B parents: {', '.join(parent_names)}")
+                else:
+                    print(f"    Person B parents: Unknown")
+                print()
+            
+            print("=" * 80)
+            print()
+        
+        # Summary statistics
+        high_confidence = sum(1 for dup in duplicates if dup['confidence'] >= 0.8)
+        medium_confidence = sum(1 for dup in duplicates if 0.7 <= dup['confidence'] < 0.8)
+        low_confidence = sum(1 for dup in duplicates if dup['confidence'] < 0.7)
+        
+        print(f"Summary:")
+        print(f"  High confidence (≥0.8): {high_confidence}")
+        print(f"  Medium confidence (0.7-0.8): {medium_confidence}")
+        print(f"  Low confidence (<0.7): {low_confidence}")
+        print(f"  Total potential duplicates: {len(duplicates)}")
+        print(f"\nNote: Excluded same-parent non-overlapping ages and cousin relationships.")
+        
+        input("\nPress Enter to continue...")
+
+    def _ages_overlap(self, person1, person2, tolerance: int = 5) -> bool:
+        """Check if two people's ages could have overlapped (accounting for uncertainty)."""
+        # Get birth and death years for both people
+        def get_life_span(person):
+            birth_year = person.birth_year
+            death_year = person.death_year if person.is_deceased() else None
+            return birth_year, death_year
+        
+        birth1, death1 = get_life_span(person1)
+        birth2, death2 = get_life_span(person2)
+        
+        # If we don't have birth years for both, assume they could overlap
+        if not birth1 or not birth2:
+            return True
+        
+        # Calculate the earliest possible death and latest possible birth for each
+        # Add tolerance for date uncertainty
+        
+        # Person 1's life span (with tolerance)
+        p1_earliest_death = death1 - tolerance if death1 else (birth1 + 100)  # Assume max 100 years if no death
+        p1_latest_birth = birth1 + tolerance
+        
+        # Person 2's life span (with tolerance)
+        p2_earliest_death = death2 - tolerance if death2 else (birth2 + 100)
+        p2_latest_birth = birth2 + tolerance
+        
+        # They overlap if person1's life could have extended to person2's birth time or vice versa
+        overlap = not (p1_earliest_death < p2_latest_birth or p2_earliest_death < p1_latest_birth)
+        
+        return overlap
+
+    def _are_cousins(self, person1_parents: set, person2_parents: set, sibling_cache: dict) -> bool:
+        """Check if two people are cousins (share grandparents but not parents)."""
+        if not person1_parents or not person2_parents:
+            return False
+        
+        # If they have the same parents, they're siblings, not cousins
+        if person1_parents == person2_parents:
+            return False
+        
+        # Check if any parent of person1 is a sibling of any parent of person2
+        for parent1_id in person1_parents:
+            parent1_siblings = sibling_cache.get(parent1_id, set())
+            if person2_parents.intersection(parent1_siblings):
+                return True  # Found cousin relationship
+        
+        return False
+
+
+
+
+    def _calculate_name_similarity(self, name1: str, name2: str) -> float:
+        """Calculate similarity between two names using multiple algorithms."""
+        if not name1 or not name2:
+            return 0.0
+        
+        # Normalize names
+        def normalize_name(name):
+            # Remove common prefixes/suffixes and extra whitespace
+            name = name.lower().strip()
+            # Remove common titles
+            prefixes = ['mr', 'mrs', 'miss', 'dr', 'rev', 'sir', 'lady']
+            suffixes = ['jr', 'sr', 'ii', 'iii', 'iv']
+            
+            words = name.split()
+            words = [w for w in words if w not in prefixes and w not in suffixes]
+            return ' '.join(words)
+        
+        norm1 = normalize_name(name1)
+        norm2 = normalize_name(name2)
+        
+        # Exact match after normalization
+        if norm1 == norm2:
+            return 1.0
+        
+        # Use multiple similarity measures and take the highest
+        similarities = []
+        
+        # 1. Levenshtein distance (edit distance)
+        similarities.append(self._levenshtein_similarity(norm1, norm2))
+        
+        # 2. Jaccard similarity (word-based)
+        similarities.append(self._jaccard_similarity(norm1, norm2))
+        
+        # 3. Common substring ratio
+        similarities.append(self._common_substring_similarity(norm1, norm2))
+        
+        # Return the highest similarity score
+        return max(similarities)
+
+    def _levenshtein_similarity(self, s1: str, s2: str) -> float:
+        """Calculate Levenshtein similarity (1 - normalized edit distance)."""
+        if len(s1) < len(s2):
+            s1, s2 = s2, s1
+        
+        if len(s2) == 0:
+            return 0.0
+        
+        previous_row = list(range(len(s2) + 1))
+        for i, c1 in enumerate(s1):
+            current_row = [i + 1]
+            for j, c2 in enumerate(s2):
+                insertions = previous_row[j + 1] + 1
+                deletions = current_row[j] + 1
+                substitutions = previous_row[j] + (c1 != c2)
+                current_row.append(min(insertions, deletions, substitutions))
+            previous_row = current_row
+        
+        edit_distance = previous_row[-1]
+        max_len = max(len(s1), len(s2))
+        return 1 - (edit_distance / max_len)
+
+    def _jaccard_similarity(self, s1: str, s2: str) -> float:
+        """Calculate Jaccard similarity based on word sets."""
+        words1 = set(s1.split())
+        words2 = set(s2.split())
+        
+        if not words1 and not words2:
+            return 1.0
+        
+        intersection = words1.intersection(words2)
+        union = words1.union(words2)
+        
+        return len(intersection) / len(union) if union else 0.0
+
+    def _common_substring_similarity(self, s1: str, s2: str) -> float:
+        """Calculate similarity based on longest common substring."""
+        def longest_common_substring(str1, str2):
+            m, n = len(str1), len(str2)
+            dp = [[0] * (n + 1) for _ in range(m + 1)]
+            length = 0
+            
+            for i in range(1, m + 1):
+                for j in range(1, n + 1):
+                    if str1[i-1] == str2[j-1]:
+                        dp[i][j] = dp[i-1][j-1] + 1
+                        length = max(length, dp[i][j])
+                    else:
+                        dp[i][j] = 0
+            
+            return length
+        
+        lcs_length = longest_common_substring(s1, s2)
+        max_length = max(len(s1), len(s2))
+        
+        return lcs_length / max_length if max_length > 0 else 0.0
+
+    def _calculate_date_proximity(self, person1, person2, threshold_years: int) -> tuple:
+        """Calculate date proximity score and return details."""
+        scores = []
+        details = []
+        
+        # Compare birth dates
+        birth_score = self._compare_dates(person1.birth_date, person1.birth_year,
+                                        person2.birth_date, person2.birth_year,
+                                        threshold_years, "birth")
+        if birth_score > 0:
+            scores.append(birth_score)
+            birth_diff = self._get_date_difference(person1.birth_date, person1.birth_year,
+                                                person2.birth_date, person2.birth_year)
+            details.append(f"Birth dates within {abs(birth_diff)} years")
+        
+        # Compare death dates
+        death_score = self._compare_dates(person1.death_date, person1.death_year,
+                                        person2.death_date, person2.death_year,
+                                        threshold_years, "death")
+        if death_score > 0:
+            scores.append(death_score)
+            death_diff = self._get_date_difference(person1.death_date, person1.death_year,
+                                                person2.death_date, person2.death_year)
+            details.append(f"Death dates within {abs(death_diff)} years")
+        
+        # Overall score is the average of matching date types
+        overall_score = sum(scores) / len(scores) if scores else 0
+        detail_text = "; ".join(details) if details else "No matching dates within threshold"
+        
+        return overall_score, detail_text
+
+    def _compare_dates(self, date1, year1, date2, year2, threshold: int, date_type: str) -> float:
+        """Compare two dates and return proximity score."""
+        diff = self._get_date_difference(date1, year1, date2, year2)
+        
+        if diff is None:
+            return 0  # Can't compare if one or both dates are missing
+        
+        if abs(diff) <= threshold:
+            # Score decreases as difference increases
+            return 1 - (abs(diff) / threshold)
+        
+        return 0
+
+    def _get_date_difference(self, date1, year1, date2, year2) -> int:
+        """Get the difference in years between two dates."""
+        # Get the best available year for each date
+        def get_year(date_obj, year_int):
+            if date_obj:
+                return date_obj.year
+            elif year_int:
+                return year_int
+            return None
+        
+        y1 = get_year(date1, year1)
+        y2 = get_year(date2, year2)
+        
+        if y1 is None or y2 is None:
+            return None
+        
+        return y1 - y2
+
+    def _calculate_confidence_score(self, name_similarity: float, date_proximity: float) -> float:
+        """Calculate overall confidence score for duplicate detection."""
+        # Weight name similarity more heavily than date proximity
+        # Names are more reliable identifiers than dates in genealogical data
+        name_weight = 0.7
+        date_weight = 0.3
+        
+        return (name_similarity * name_weight) + (date_proximity * date_weight)
+

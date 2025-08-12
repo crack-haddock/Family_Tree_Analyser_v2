@@ -144,6 +144,9 @@ class MenuSystem:
         self._add_option("8", "Check parents who died before children were born",
                         self.validity_handler.check_parents_died_before_children_born, "v", ["read", "dates"])
 
+        self._add_option("9", "Check for potential duplicates",
+                        self.database.find_potential_duplicates, "v", ["read", "dates"])
+
         
         # === SEARCH & NAVIGATION ===
         self._add_option("1", "Find individual by name", 
@@ -157,6 +160,9 @@ class MenuSystem:
 
         self._add_option("4", "Show tree of descendants", 
                         self.search_handler.show_descendant_tree, "s", ["read", "relationships"])
+
+        self._add_option("5", "Find individual by name (+ extra details)", 
+                        self.database.find_individual_by_name_with_details, "s", ["read", "search"])
 
         # === ANALYSIS REPORTS ===
         self._add_option("1", "Birth place analysis (nations summary)", 
@@ -549,7 +555,12 @@ class MenuSystem:
             # Single match - show and ask for confirmation
             individual = results[0]
             birth_year = individual.birth_year or "Unknown"
-            death_year = individual.death_year or "Unknown"
+
+            if individual.is_deceased():
+                death_year = individual.death_year or "Unknown"
+                death_display = f" | Death: {death_year}"
+            else:
+                death_display = ""  # Don't show death info if living
             
             print(f"\nFound 1 matching individual:")
             print(f"  Name: {individual.name}")
@@ -568,7 +579,11 @@ class MenuSystem:
             print(f"\nFound {len(results)} matching individuals:")
             for i, individual in enumerate(results, 1):
                 birth_year = individual.birth_year or "Unknown"
-                death_year = individual.death_year or "Unknown"
+                if individual.is_deceased():
+                    death_year = individual.death_year or "Unknown"
+                    death_display = f", died {death_year}"
+                else:
+                    death_display = ""  # Don't show anything if living
                 print(f"{i:3}. {individual.name}")
                 print(f"     Birth: {birth_year} | Death: {death_year}")
                 print(f"     ID: {individual.xref_id}")
