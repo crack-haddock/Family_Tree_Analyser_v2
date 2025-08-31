@@ -20,7 +20,7 @@
     "Wales": [
       "Flintshire",
       "Denbighshire",
-      "Caernarvonshire"
+      "Gwynedd"
     ],
     "Scotland": [],
     "UK":["Scotland", "Wales", "England", "Northern Ireland"],
@@ -133,8 +133,9 @@
         "known_streets": []
       }
     },
-    "Caernarvonshire": {
+    "Gwynedd": {
       "Bangor": {
+        "historical_counties": ["Caernarfonshire", "Caernarvonshire", "Caernarvon"],
         "local2_places": [],
         "known_streets": []
       }
@@ -167,12 +168,14 @@
         "known_streets": []
       }
     },
-    "Devon/Dorset": {
+    "Dorset": {},
+    "Devon": {
       "Dalwood": {
         "local2_places": ["Culderwell"],
         "known_streets": []
       },
       "Stockland": {
+        "historical_county": "Dorset",
         "local2_places": [],
         "known_streets": []
       },

@@ -555,13 +555,11 @@ class MenuSystem:
             # Single match - show and ask for confirmation
             individual = results[0]
             birth_year = individual.birth_year or "Unknown"
+            death_year = "Living"  # Default to living
 
             if individual.is_deceased():
                 death_year = individual.death_year or "Unknown"
-                death_display = f" | Death: {death_year}"
-            else:
-                death_display = ""  # Don't show death info if living
-            
+
             print(f"\nFound 1 matching individual:")
             print(f"  Name: {individual.name}")
             print(f"  Birth: {birth_year} | Death: {death_year}")
@@ -579,11 +577,10 @@ class MenuSystem:
             print(f"\nFound {len(results)} matching individuals:")
             for i, individual in enumerate(results, 1):
                 birth_year = individual.birth_year or "Unknown"
+                death_year = "Living"  # Default to living
                 if individual.is_deceased():
                     death_year = individual.death_year or "Unknown"
-                    death_display = f", died {death_year}"
-                else:
-                    death_display = ""  # Don't show anything if living
+
                 print(f"{i:3}. {individual.name}")
                 print(f"     Birth: {birth_year} | Death: {death_year}")
                 print(f"     ID: {individual.xref_id}")

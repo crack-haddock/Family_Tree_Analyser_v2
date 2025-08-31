@@ -24,7 +24,6 @@ except ImportError:
     print("Warning: ged4py library not found. Install with: pip install ged4py")
     GedcomReader = None
 
-
 class Ged4PyIndividual(Individual):
     """Individual wrapper for ged4py records."""
     
@@ -810,7 +809,6 @@ class Ged4PyFamily(Family):
             children.append(Ged4PyIndividual(child_ref.xref_id, child_ref))
         return children
 
-
 class Ged4PyGedcomDB(GedcomDB):
     """GEDCOM database implementation using ged4py library."""
     
@@ -843,11 +841,28 @@ class Ged4PyGedcomDB(GedcomDB):
 
         self._geocoding_cache = {}
         self._geocoding_cache_file = self._cache_dir / 'geocoding_cache.json'
+
+        self._places_config = None
+        self._places_config_file = self._base_dir / 'places_config.json'
     
     @property
     def records(self):
         """Access to source records for occupation extraction."""
         return self._source_index
+
+    def _load_places_config(self):
+        """Load places_config.json into memory once."""
+        try:
+            if self._places_config_file.exists():
+                with open(self._places_config_file, 'r', encoding='utf-8') as f:
+                    self._places_config = json.load(f)
+                print(f"Loaded places configuration from {self._places_config_file}")
+            else:
+                self._places_config = {}
+                print("No places_config.json found, using empty configuration.")
+        except Exception as e:
+            print(f"Error loading places configuration: {e}")
+            self._places_config = {}
 
     def _select_gedcom_file(self) -> Optional[str]:
         """Present a menu of .ged files in the 'ged' subfolder for user selection."""
@@ -1231,10 +1246,6 @@ class Ged4PyGedcomDB(GedcomDB):
         
         return matches
 
-
-
-
-
     def find_individual_by_name_with_details(self):
         """Find and show detailed information for an individual by name."""
         name = input("Enter name to search for: ").strip()
@@ -1519,10 +1530,6 @@ class Ged4PyGedcomDB(GedcomDB):
         
         check_source_fields(source_record)
 
-
-
-
-
     # ============ CACHING METHODS ============
     
     def _get_cache_file_base(self) -> str:
@@ -1680,64 +1687,51 @@ class Ged4PyGedcomDB(GedcomDB):
 
     def _geocode_places_config(self):
         """Geocode any missing places from places_config.json on startup."""
-        places_config_file = self._base_dir / 'places_config.json'
-        
-        if not places_config_file.exists():
-            print("No places_config.json found, skipping startup geocoding.")
+        if not self._places_config:  # Use cached config
             return
         
-        try:
-            with open(places_config_file, 'r', encoding='utf-8') as f:
-                places_config = json.load(f)
-            
-            places_to_geocode = []
-            
-            # Define structural keys that should be skipped (not geocoded)
-            structural_keys = {
-                '_comment', 'nation_counties', 'county_places', 'nation_places',
-                'local2_places', 'known_streets'
-            }
-            
-            # Extract places from all levels of the hierarchy
-            def extract_places_recursive(data, path=""):
-                if isinstance(data, dict):
-                    for key, value in data.items():
-                        if key in structural_keys:
-                            # Skip the structural key itself, but process its contents
-                            extract_places_recursive(value, f"{path}/{key}" if path else key)
-                        else:
-                            # This is a place name - check if we need to geocode it
-                            if not self._is_place_cached(key):
-                                places_to_geocode.append(key)
-                            
-                            # Recursively process the value
-                            extract_places_recursive(value, f"{path}/{key}" if path else key)
+        places_to_geocode = []
+        
+        # Define structural keys that should be skipped (not geocoded)
+        structural_keys = {
+            '_comment', 'nation_counties', 'county_places', 'nation_places',
+            'local2_places', 'known_streets'
+        }
+        
+        # Extract places from all levels of the hierarchy
+        def extract_places_recursive(data, path=""):
+            if isinstance(data, dict):
+                for key, value in data.items():
+                    if key in structural_keys:
+                        # Skip the structural key itself, but process its contents
+                        extract_places_recursive(value, f"{path}/{key}" if path else key)
+                    else:
+                        # This is a place name - check if we need to geocode it
+                        if not self._is_place_cached(key):
+                            places_to_geocode.append(key)
                         
-                elif isinstance(data, list):
-                    for item in data:
-                        if isinstance(item, str) and not self._is_place_cached(item):
-                            places_to_geocode.append(item)
-                        else:
-                            extract_places_recursive(item, path)
+                        # Recursively process the value
+                        extract_places_recursive(value, f"{path}/{key}" if path else key)
+                    
+            elif isinstance(data, list):
+                for item in data:
+                    if isinstance(item, str) and not self._is_place_cached(item):
+                        places_to_geocode.append(item)
+                    else:
+                        extract_places_recursive(item, path)
+        
+        # Process the entire config structure
+        extract_places_recursive(self._places_config)
+        
+        if places_to_geocode:
+            print(f"Geocoding {len(places_to_geocode)} new places from places_config.json...")
+            for place_name in places_to_geocode:
+                self._get_geocoded_location(place_name)
             
-            # Process the entire config structure
-            extract_places_recursive(places_config)
-            
-            if places_to_geocode:
-                print(f"Geocoding {len(places_to_geocode)} new places from places_config.json...")
-                for place_name in places_to_geocode:
-                    self._get_geocoded_location(place_name)
-                
-                # Save updated cache
-                self._save_geocoding_cache()
-            else:
-                print("All places from places_config.json already geocoded.")
-                
-        except Exception as e:
-            print(f"Error processing places_config.json: {e}")
-
-
-
+            # Save updated cache
+            self._save_geocoding_cache()
+        else:
+            print("All places from places_config.json already geocoded.")
 
     def _is_place_cached(self, place_name: str) -> bool:
         """Check if a place is already cached, including substring matches and failed lookups."""
@@ -1851,11 +1845,8 @@ class Ged4PyGedcomDB(GedcomDB):
         
         return False  # Not cached at all
 
-
-
-
     def load_file(self, file_path: str = None) -> bool:
-        """Load GEDCOM file using ged4py with intelligent caching and file selection."""
+        print("""Load GEDCOM file using ged4py with intelligent caching and file selection.""")
         if GedcomReader is None:
             print("Error: ged4py library not available")
             return False
@@ -1991,8 +1982,12 @@ class Ged4PyGedcomDB(GedcomDB):
             print(f"Indexes built and cached successfully. ({end_time - start_time:.3f} seconds)")
             
             # Load geocoding cache and geocode places_config
+            print("Geocoding places from places_config.json...")
+            self._load_places_config()
+            print("Loading geocoding cache...")
             self._load_geocoding_cache()
-            self._geocode_places_config()
+            print("Geocoding any missing places...")
+            self._ensure_places_config_geocoded()
             
             # Show summary after successful load
             self.show_gedcom_summary()
@@ -2492,6 +2487,7 @@ class Ged4PyGedcomDB(GedcomDB):
     def _load_geocoding_cache(self):
         """Load geocoding cache from file into memory."""
         try:
+            cache_was_empty = False
             if self._geocoding_cache_file.exists():
                 with open(self._geocoding_cache_file, 'r', encoding='utf-8') as f:
                     self._geocoding_cache = json.load(f)
@@ -2499,6 +2495,19 @@ class Ged4PyGedcomDB(GedcomDB):
             else:
                 self._geocoding_cache = {}
                 print("No geocoding cache found, starting fresh.")
+                cache_was_empty = True
+            
+            # If cache is empty, check and load places_config if needed
+            if cache_was_empty or len(self._geocoding_cache) == 0:
+                # Ensure places_config is loaded first
+                if not hasattr(self, '_places_config') or self._places_config is None:
+                    self._load_places_config()
+                    
+                # Now we can safely check and use places_config
+                if self._places_config:
+                    print("Cache is empty - populating with places from places_config.json...")
+                    self._ensure_places_config_geocoded()
+                
         except Exception as e:
             print(f"Error loading geocoding cache: {e}")
             self._geocoding_cache = {}
@@ -2513,21 +2522,32 @@ class Ged4PyGedcomDB(GedcomDB):
         except Exception as e:
             print(f"Error saving geocoding cache: {e}")
 
-
-
-
-
-    def _get_geocoded_location(self, place_name: str, person_info: dict = None):
+    def _get_geocoded_location(self, place_name: str, person_info: dict = None, debug: bool = False):
         """Get geocoded location using enhanced UK-preference algorithm with progressive left-trimming."""
         if not place_name or not place_name.strip():
             return None
         
-        place_key = place_name.strip()
+        place_key = place_name.strip().lower() 
         
+        if debug:
+            print(f"\n--- GEOCODING DEBUG ---")
+            print(f"Original input: '{place_name}'")
+            print(f"Cache key: '{place_key}'")
+
         # Direct cache match first - silent
         if place_key in self._geocoding_cache:
             cached_data = self._geocoding_cache[place_key]
             
+            if debug:
+                print(f"✓ CACHE HIT: Found in geocoding cache")
+                print(f"  Source: {cached_data.get('source', 'Unknown')}")
+                if cached_data.get('geocoded_address'):
+                    print(f"  Geocoded address: {cached_data.get('geocoded_address')}")
+                if cached_data.get('lat') is not None:
+                    print(f"  Coordinates: {cached_data.get('lat')}, {cached_data.get('lng')}")
+                else:
+                    print(f"  [Cached failed lookup]")
+
             if cached_data.get('lat') is not None and cached_data.get('lng') is not None:
                 return {
                     'latitude': cached_data['lat'],
@@ -2548,6 +2568,41 @@ class Ged4PyGedcomDB(GedcomDB):
             
             geolocator = Nominatim(user_agent="family_tree_mapper_v1.0")
             uk_result_indicators = ['united kingdom', 'uk', 'great britain', 'gb', 'england', 'wales', 'scotland', 'northern ireland']
+            
+            if debug:
+                print(f"\nChecking if address looks like UK: {looks_like_uk_address}")
+                print(f"Checking for UK enhancement via places_config...")
+
+            # Check places_config for UK enhancement
+            enhanced_address = self._check_places_config_for_uk_enhancement(place_name, debug=True)
+            if enhanced_address and enhanced_address != place_name:
+                if person_info and debug:
+                    print(f"Trying UK-enhanced address: {enhanced_address}")
+                # Try geocoding with enhanced address (adds UK context)
+                enhanced_location = geolocator.geocode(enhanced_address, timeout=15)
+                if enhanced_location:
+                    # Check if it's a UK result
+                    enhanced_address_lower = enhanced_location.address.lower()
+                    is_uk_result = any(indicator in enhanced_address_lower for indicator in uk_result_indicators)
+                    if is_uk_result:
+                        # Use the enhanced UK result
+                        chosen_location = enhanced_location
+                        cache_entry = {
+                            'lat': chosen_location.latitude,
+                            'lng': chosen_location.longitude,
+                            'cached_date': datetime.now().isoformat(),
+                            'source': 'nominatim_places_config_enhanced',
+                            'geocoded_address': chosen_location.address
+                        }
+                        self._geocoding_cache[place_key] = cache_entry
+                        
+                        time.sleep(1)  # Rate limiting
+                        
+                        return {
+                            'latitude': chosen_location.latitude,
+                            'longitude': chosen_location.longitude,
+                            'source': 'geocoded_uk_enhanced'
+                        }
             
             chosen_location = None
             
@@ -2670,100 +2725,151 @@ class Ged4PyGedcomDB(GedcomDB):
 
 
 
-    def _check_places_config_for_uk_enhancement(self, address: str) -> str:
+    def _check_places_config_for_uk_enhancement(self, address: str, debug=False) -> str:
         """Check if the last part of an address is a UK place in places_config and enhance it."""
-        try:
-            places_config_file = self._base_dir / 'places_config.json'
+        if debug:
+            print(f"Checking places_config for UK enhancement of address: '{address}'")
             
-            if not places_config_file.exists():
-                return address
-            
-            with open(places_config_file, 'r', encoding='utf-8') as f:
-                places_config = json.load(f)
-            
-            # Get the last part of the address (most general location)
-            parts = [p.strip() for p in address.split(',') if p.strip()]
-            if not parts:
-                return address
-            
-            last_part = parts[-1].lower()
-            
-            # Check if last part is a country first
-            nation_places = places_config.get('nation_places', {})
-            for country, places in nation_places.items():
-                if country.lower() == last_part:
-                    # It's already a country, don't enhance
-                    return address
-            
-            # Check if last part is a UK county/place and find which nation it belongs to
-            nation_counties = places_config.get('nation_counties', {})
-            
-            # Check if it's a county in England/Wales/Scotland
-            for nation, counties in nation_counties.items():
-                if isinstance(counties, list):
-                    for county in counties:
-                        # Handle slash-separated counties
-                        if '/' in county:
-                            county_variants = [c.strip().lower() for c in county.split('/')]
-                            if last_part in county_variants:
-                                # Found it! Enhance with the correct nation
-                                enhanced_address = f"{address}, {nation}"
-                                return enhanced_address
-                        else:
-                            if county.lower() == last_part:
-                                # Found it! Enhance with the correct nation
-                                enhanced_address = f"{address}, {nation}"
-                                return enhanced_address
-            
-            # Check county_places for sub-locations
-            county_places = places_config.get('county_places', {})
-            for county, places in county_places.items():
-                if isinstance(places, list):
-                    for place in places:
-                        # Handle slash-separated places
-                        if '/' in place:
-                            place_variants = [p.strip().lower() for p in place.split('/')]
-                            if last_part in place_variants:
-                                # Found in a county - need to find which nation this county is in
-                                county_lower = county.lower()
-                                for nation, counties in nation_counties.items():
-                                    if isinstance(counties, list):
-                                        for nation_county in counties:
-                                            if '/' in nation_county:
-                                                nation_county_variants = [c.strip().lower() for c in nation_county.split('/')]
-                                                if county_lower in nation_county_variants:
-                                                    enhanced_address = f"{address}, {county}, {nation}"
-                                                    return enhanced_address
-                                            else:
-                                                if nation_county.lower() == county_lower:
-                                                    enhanced_address = f"{address}, {county}, {nation}"
-                                                    return enhanced_address
-                        else:
-                            if place.lower() == last_part:
-                                # Found in a county - need to find which nation this county is in
-                                county_lower = county.lower()
-                                for nation, counties in nation_counties.items():
-                                    if isinstance(counties, list):
-                                        for nation_county in counties:
-                                            if '/' in nation_county:
-                                                nation_county_variants = [c.strip().lower() for c in nation_county.split('/')]
-                                                if county_lower in nation_county_variants:
-                                                    enhanced_address = f"{address}, {county}, {nation}"
-                                                    return enhanced_address
-                                            else:
-                                                if nation_county.lower() == county_lower:
-                                                    enhanced_address = f"{address}, {county}, {nation}"
-                                                    return enhanced_address
-            
-            # If we get here, the last part wasn't found in UK places config
+        if not self._places_config:
+            if debug:
+                print(f"No places_config available for enhancement. Returning original address.")
             return address
-            
-        except Exception as e:
-            print(f"Error checking places config for UK enhancement: {e}")
+        
+        # Extract parts from comma-separated address
+        parts = [p.strip() for p in address.split(',') if p.strip()]
+        if debug:
+            print(f"Address parts: {parts}")
+        
+        if len(parts) < 2:
             return address
+        
+        # Check for historical county mapping
+        place = parts[0]  # e.g. "Bangor"
+        county = parts[1]  # e.g. "Caernarvonshire"
+        
+        # Check if this is a historical county reference
+        county_places = self._places_config.get('county_places', {})
+        for current_county, places in county_places.items():
+            # Check if place exists in this county
+            if place.lower() in map(str.lower, places.keys()):
+                # Find the actual case-sensitive place key
+                for place_key in places.keys():
+                    if place.lower() == place_key.lower():
+                        place_data = places[place_key]
+                        
+                        # First check array-based historical_counties (new format)
+                        if "historical_counties" in place_data:
+                            for hist_county in place_data["historical_counties"]:
+                                # Handle comma-separated variants within each array entry
+                                variants = [v.strip() for v in hist_county.split(',')]
+                                for variant in variants:
+                                    if county.lower() == variant.lower():
+                                        if debug:
+                                            print(f"✓ Historical county match: '{county}' → '{current_county}'")
+                                        
+                                        # Replace county with current county
+                                        updated_parts = parts.copy()
+                                        updated_parts[1] = current_county
+                                        return ', '.join(updated_parts)
+                        
+                        # Fall back to legacy single historical_county format
+                        elif "historical_county" in place_data and county.lower() == place_data["historical_county"].lower():
+                            if debug:
+                                print(f"✓ Historical county match (legacy): '{county}' → '{current_county}'")
+                            
+                            # Replace county with current county
+                            updated_parts = parts.copy()
+                            updated_parts[1] = current_county
+                            return ', '.join(updated_parts)
+        
+        # Special case for places like "Chester, Cheshire"
+        # Check if the last part is directly a UK county in our config
+        last_part = parts[-1].lower()
+        nation_counties = self._places_config.get('nation_counties', {})
+        for nation, counties in nation_counties.items():
+            if isinstance(counties, list):
+                for county in counties:
+                    county_lower = county.lower()
+                    if '/' in county_lower:  # Handle variants like "Shropshire/Salop"
+                        county_variants = [c.strip() for c in county_lower.split('/')]
+                        if last_part in county_variants:
+                            return f"{address}, {nation}"
+                    elif county_lower == last_part:
+                        return f"{address}, {nation}"
 
-
-
+        # Check if last part is a country first
+        nation_places = self._places_config.get('nation_places', {})
+        for country, places in nation_places.items():
+            if country.lower() == last_part:
+                # It's already a country, don't enhance
+                if debug:
+                    print(f"Address '{address}' is already a country: {country}")
+                return address
+        
+        # Check if last part is a UK county/place and find which nation it belongs to
+        nation_counties = self._places_config.get('nation_counties', {})
+        
+        # Check if it's a county in England/Wales/Scotland
+        for nation, counties in nation_counties.items():
+            if isinstance(counties, list):
+                for county in counties:
+                    # Handle slash-separated counties
+                    if '/' in county:
+                        county_variants = [c.strip().lower() for c in county.split('/')]
+                        if last_part in county_variants:
+                            # Found it! Enhance with the correct nation
+                            enhanced_address = f"{address}, {nation}"
+                            return enhanced_address
+                    else:
+                        if county.lower() == last_part:
+                            # Found it! Enhance with the correct nation
+                            if debug:
+                                print(f"Found county match (enhancing with its nation): {county} in {nation}")
+                            enhanced_address = f"{address}, {nation}"
+                            return enhanced_address
+        
+        # Check county_places for sub-locations
+        county_places = self._places_config.get('county_places', {})
+        for county, places in county_places.items():
+            if isinstance(places, dict):  # This is the correct structure
+                for place in places.keys():
+                    # Handle slash-separated places
+                    if '/' in place:
+                        place_variants = [p.strip().lower() for p in place.split('/')]
+                        if last_part in place_variants:
+                            # Found in a county - need to find which nation this county is in
+                            county_lower = county.lower()
+                            for nation, counties in nation_counties.items():
+                                if isinstance(counties, list):
+                                    for nation_county in counties:
+                                        if '/' in nation_county:
+                                            nation_county_variants = [c.strip().lower() for c in nation_county.split('/')]
+                                            if county_lower in nation_county_variants:
+                                                enhanced_address = f"{address}, {county}, {nation}"
+                                                return enhanced_address
+                                        else:
+                                            if nation_county.lower() == county_lower:
+                                                enhanced_address = f"{address}, {county}, {nation}"
+                                                return enhanced_address
+                    else:
+                        if place.lower() == last_part:
+                            # Found in a county - need to find which nation this county is in
+                            county_lower = county.lower()
+                            for nation, counties in nation_counties.items():
+                                if isinstance(counties, list):
+                                    for nation_county in counties:
+                                        if '/' in nation_county:
+                                            nation_county_variants = [c.strip().lower() for c in nation_county.split('/')]
+                                            if county_lower in nation_county_variants:
+                                                enhanced_address = f"{address}, {county}, {nation}"
+                                                return enhanced_address
+                                        else:
+                                            if nation_county.lower() == county_lower:
+                                                enhanced_address = f"{address}, {county}, {nation}"
+                                                return enhanced_address
+        
+        # If we get here, the last part wasn't found in UK places config
+        return address
 
 
 
@@ -2920,8 +3026,6 @@ class Ged4PyGedcomDB(GedcomDB):
         
         return None
 
-
-
     def _find_uk_location_in_results(self, locations) -> object:
         """Find UK location among multiple geocoding results."""
         uk_indicators = [
@@ -2937,7 +3041,44 @@ class Ged4PyGedcomDB(GedcomDB):
         
         return None
 
-
+    def _ensure_places_config_geocoded(self):
+        print("Ensuring all places from places_config.json are geocoded...")
+        """Ensure all places from places_config.json are in the geocoding cache."""
+        if not self._places_config:
+            if not hasattr(self, '_places_config_file') or not self._places_config_file.exists():
+                print("No places_config.json file found.")
+                return
+            
+            # Load places_config if not already loaded
+            self._load_places_config()
+        
+        # Count places in config before geocoding
+        place_count = 0
+        
+        def count_places_recursive(data):
+            nonlocal place_count
+            if isinstance(data, dict):
+                for key, value in data.items():
+                    if key not in {'_comment', 'nation_counties', 'county_places', 'nation_places', 
+                                'local2_places', 'known_streets'}:
+                        place_count += 1
+                    count_places_recursive(value)
+            elif isinstance(data, list):
+                for item in data:
+                    if isinstance(item, str):
+                        place_count += 1
+                    else:
+                        count_places_recursive(item)
+        
+        count_places_recursive(self._places_config)
+        print(f"Found {place_count} places in places_config.json.")
+        # Only show message if there are places to potentially geocode
+        if place_count > 0:
+            cache_count = len(self._geocoding_cache)
+            print(f"Checking {place_count} places from places_config.json against {cache_count} cached locations...")
+            
+            # Geocode any missing places from the config
+            self._geocode_places_config()
 
     def clear_geocoding_cache(self):
         """Clear the geocoding cache (for debugging or cache corruption)."""
@@ -2945,6 +3086,16 @@ class Ged4PyGedcomDB(GedcomDB):
         if self._geocoding_cache_file.exists():
             self._geocoding_cache_file.unlink()
         print("Geocoding cache cleared.")
+        
+        # Ask if user wants to repopulate with places_config
+        repopulate = input("\nDo you want to repopulate the cache with places from places_config.json? (Y/n): ").strip().lower()
+        if repopulate != 'n':  # Default is yes
+            print("\nRepopulating cache with places_config.json entries...")
+            self._ensure_places_config_geocoded()
+            print("\nCache repopulated with places_config.json entries.")
+        else:
+            print("\nCache left empty.")
+        
         input("\nPress Enter to continue...")
 
     def clear_cache(self):
@@ -3120,12 +3271,6 @@ class Ged4PyGedcomDB(GedcomDB):
         
         for ind in individuals:
             if ind.birth_place:
-
-
-                if 'chester' in ind.birth_place.lower():
-                    print(f"🏴󠁧󠁢󠁥󠁮󠁧󠁿 CHESTER DEBUG: Found person born in Chester area: {ind.name} (born {ind.birth_year}) - Place: '{ind.birth_place}'")
-
-
                 place = ind.birth_place.strip()
                 if place not in places_data:
                     places_data[place] = {
@@ -3202,11 +3347,6 @@ class Ged4PyGedcomDB(GedcomDB):
         
         return maps_url
 
-
-
-
-
-
     def _cluster_places_by_coordinates(self, places_data: dict) -> dict:
         """Group places by their coordinates to avoid duplicate pins."""
         coordinate_clusters = {}
@@ -3250,11 +3390,6 @@ class Ged4PyGedcomDB(GedcomDB):
                 coordinate_clusters[coord_key]['all_birth_years'].extend(data.get('birth_years', []))
         
         return coordinate_clusters
-
-
-
-
-
 
     def create_folium_map(self, places_data: dict):
         """Create interactive map using Folium with coordinate-based clustering to avoid duplicate pins."""
@@ -3576,10 +3711,6 @@ class Ged4PyGedcomDB(GedcomDB):
                 print("Invalid choice. Please try again.")
                 input("\nPress Enter to continue...")
 
-
-
-
-
     def check_parents_died_before_children_born(self):
         """Check for parents who died before their children were born."""
         print("\n=== Parents Who Died Before Children Were Born ===\n")
@@ -3778,16 +3909,17 @@ class Ged4PyGedcomDB(GedcomDB):
         
         input("\nPress Enter to continue...")
 
-
-
-
-
     def test_single_address_mapping(self):
         """Test geocoding and mapping of a single address - temporary feature for debugging."""
         print("\n" + "="*50)
         print("SINGLE ADDRESS GEOCODING TEST")
         print("="*50)
-        
+
+        # Ensure places_config is loaded
+        if not hasattr(self, '_places_config') or not self._places_config:
+            print("Places config not loaded. Loading now...")
+            self._load_places_config()
+
         # Get address from user
         address = input("Enter full address to test: ").strip()
         
@@ -3812,7 +3944,7 @@ class Ged4PyGedcomDB(GedcomDB):
             print("Using main geocoding function with debug output enabled...")
         
         # Call the main geocoding function
-        location_data = self._get_geocoded_location_with_debug(address, person_info, show_debug)
+        location_data = self._get_geocoded_location(address, person_info, debug=True)
         
         # Display result
         if location_data:
@@ -3861,389 +3993,67 @@ class Ged4PyGedcomDB(GedcomDB):
         
         input("\nPress Enter to continue...")
 
-    def _get_geocoded_location_with_debug(self, place_name: str, person_info: dict = None, show_debug: bool = False):
-        """Enhanced geocoding with debug output - mirrors the main function but with optional debug prints."""
-        if not place_name or not place_name.strip():
-            return None
-        
-        place_key = place_name.strip()
-        
-        # Direct cache match first
-        if place_key in self._geocoding_cache:
-            cached_data = self._geocoding_cache[place_key]
-            
-            if cached_data.get('lat') is not None and cached_data.get('lng') is not None:
-                if show_debug:
-                    print(f"✓ Found in cache: {cached_data.get('geocoded_address', 'Unknown address')}")
-                return {
-                    'latitude': cached_data['lat'],
-                    'longitude': cached_data['lng'],
-                    'source': 'cache'
-                }
-            else:
-                if show_debug:
-                    print(f"✗ Found failed lookup in cache")
-                return None
-        
-        # Determine if this looks like a UK address (to guide preference logic)
-        uk_address_indicators = ['uk', 'england', 'wales', 'scotland', 'northern ireland', 'great britain', 'britain']
-        looks_like_uk_address = any(indicator in place_name.lower() for indicator in uk_address_indicators)
-        
-        if show_debug:
-            print(f"Address analysis: {'Looks like UK address' if looks_like_uk_address else 'Not obviously UK address'}")
-        
-        # Try geocoding with enhanced algorithm
-        try:
-            from geopy.geocoders import Nominatim
-            import time
-            
-            geolocator = Nominatim(user_agent="family_tree_mapper_v1.0")
-            uk_result_indicators = ['united kingdom', 'uk', 'great britain', 'gb', 'england', 'wales', 'scotland', 'northern ireland']
-            
-            chosen_location = None
-            
-            # If it's not a comma-separated address, just try it once
-            if ',' not in place_name:
-                if show_debug:
-                    print(f"\nSTEP 1: Single place name - trying '{place_name}'")
-                
-                location = geolocator.geocode(place_name, timeout=15)
-                if location:
-                    if show_debug:
-                        print(f"   ✓ SINGLE RESULT: {location.address}")
-                        print(f"   Coordinates: {location.latitude:.6f}, {location.longitude:.6f}")
-                    
-                    # Check if single result is UK
-                    address_lower = location.address.lower()
-                    is_uk_result = any(indicator in address_lower for indicator in uk_result_indicators)
-                    if show_debug:
-                        print(f"   UK result?: {'YES' if is_uk_result else 'NO'}")
-                    
-                    # If we got non-UK result but the place might be UK, check places_config
-                    if not is_uk_result and not looks_like_uk_address:
-                        if show_debug:
-                            print(f"   → Non-UK result for non-UK-indicated address, checking places_config...")
-                        enhanced_address = self._check_places_config_for_uk_enhancement(place_name)
-                        if enhanced_address and enhanced_address != place_name:
-                            if show_debug:
-                                print(f"   → Trying enhanced address: '{enhanced_address}' (found '{place_name}' in UK places config)")
-                            enhanced_location = geolocator.geocode(enhanced_address, timeout=15)
-                            if enhanced_location:
-                                enhanced_address_lower = enhanced_location.address.lower()
-                                if any(indicator in enhanced_address_lower for indicator in uk_result_indicators):
-                                    if show_debug:
-                                        print(f"   ✓ Enhanced address gave UK result: {enhanced_location.address}")
-                                    chosen_location = enhanced_location
-                                else:
-                                    if show_debug:
-                                        print(f"   → Enhanced address didn't give UK result, using original")
-                                    chosen_location = location
-                            else:
-                                if show_debug:
-                                    print(f"   → Enhanced address failed, using original")
-                                chosen_location = location
-                        else:
-                            if show_debug:
-                                print(f"   → '{place_name}' not found in UK places config, using original result")
-                            chosen_location = location
-                    else:
-                        chosen_location = location
-                else:
-                    if show_debug:
-                        print(f"   ✗ No result for '{place_name}'")
-            else:
-                # Progressive left-trimming for comma-separated addresses
-                place_parts = [p.strip() for p in place_name.split(',') if p.strip()]
-                
-                if show_debug:
-                    print(f"\nAddress parts: {place_parts}")
-                    print(f"Will try {len(place_parts)} combinations (removing leftmost parts progressively)")
-                
-                for attempt in range(len(place_parts)):
-                    # Create query by joining remaining parts (from attempt index onwards)
-                    remaining_parts = place_parts[attempt:]
-                    query = ', '.join(remaining_parts)
-                    
-                    if show_debug:
-                        print(f"\nSTEP {attempt + 1}: Trying '{query}'")
-                    
-                    try:
-                        # Try single result first
-                        location = geolocator.geocode(query, timeout=15)
-                        
-                        if location:
-                            if show_debug:
-                                print(f"   ✓ SINGLE RESULT: {location.address}")
-                                print(f"   Coordinates: {location.latitude:.6f}, {location.longitude:.6f}")
-                            
-                            # Check if single result is UK
-                            address_lower = location.address.lower()
-                            is_uk_result = any(indicator in address_lower for indicator in uk_result_indicators)
-                            if show_debug:
-                                print(f"   UK result?: {'YES' if is_uk_result else 'NO'}")
-                            
-                            # Accept single result if it matches expectation OR check places_config
-                            if (is_uk_result and looks_like_uk_address) or not looks_like_uk_address:
-                                # If we don't expect UK but got non-UK, check places config
-                                if not is_uk_result and not looks_like_uk_address:
-                                    if show_debug:
-                                        print(f"   → Non-UK result, checking if '{remaining_parts[-1]}' is in UK places config...")
-                                    enhanced_address = self._check_places_config_for_uk_enhancement(query)
-                                    if enhanced_address and enhanced_address != query:
-                                        if show_debug:
-                                            print(f"   → Trying enhanced address: '{enhanced_address}' (found '{remaining_parts[-1]}' in UK places config)")
-                                        enhanced_location = geolocator.geocode(enhanced_address, timeout=15)
-                                        if enhanced_location:
-                                            enhanced_address_lower = enhanced_location.address.lower()
-                                            if any(indicator in enhanced_address_lower for indicator in uk_result_indicators):
-                                                if show_debug:
-                                                    print(f"   ✓ Enhanced address gave UK result: {enhanced_location.address}")
-                                                chosen_location = enhanced_location
-                                                break
-                                            else:
-                                                if show_debug:
-                                                    print(f"   → Enhanced address didn't give UK result, using original")
-                                                chosen_location = location
-                                                break
-                                        else:
-                                            if show_debug:
-                                                print(f"   → Enhanced address failed, using original")
-                                            chosen_location = location
-                                            break
-                                    else:
-                                        if show_debug:
-                                            print(f"   → '{remaining_parts[-1]}' not found in UK places config, using original result")
-                                        chosen_location = location
-                                        break
-                                else:
-                                    if show_debug:
-                                        reason = "UK result for UK address" if (is_uk_result and looks_like_uk_address) else "acceptable result"
-                                        print(f"   → Using single result ({reason})")
-                                    chosen_location = location
-                                    break
-                            else:
-                                if show_debug:
-                                    print("   → Single result is not UK but we expect UK, checking multiple results...")
-                        else:
-                            if show_debug:
-                                print(f"   ✗ No single result")
-                        
-                        # Try multiple results if single wasn't suitable or didn't exist
-                        if not chosen_location:
-                            locations = geolocator.geocode(query, exactly_one=False, timeout=15)
-                            
-                            if locations:
-                                if show_debug:
-                                    print(f"   Found {len(locations)} multiple results:")
-                                
-                                uk_locations = []
-                                non_uk_locations = []
-                                
-                                for i, loc in enumerate(locations, 1):
-                                    if show_debug:
-                                        print(f"   {i:2}. {loc.address}")
-                                    
-                                    # Check if this looks like UK
-                                    address_lower = loc.address.lower()
-                                    is_uk_result = any(indicator in address_lower for indicator in uk_result_indicators)
-                                    if show_debug:
-                                        print(f"       UK result?: {'YES' if is_uk_result else 'NO'}")
-                                    
-                                    if is_uk_result:
-                                        uk_locations.append(loc)
-                                    else:
-                                        non_uk_locations.append(loc)
-                                
-                                # Choose based on whether we expect a UK address
-                                if looks_like_uk_address:
-                                    # We expect UK - prefer UK results if available
-                                    if uk_locations:
-                                        chosen_location = uk_locations[0]
-                                        if show_debug:
-                                            print(f"   → Using UK result for UK address: {chosen_location.address}")
-                                        break
-                                    elif non_uk_locations:
-                                        # No UK results but we have others - continue trying shorter address parts
-                                        if show_debug:
-                                            print(f"   → No UK results for UK address, trying shorter parts...")
-                                        continue
-                                    else:
-                                        if show_debug:
-                                            print(f"   → No results at all")
-                                        continue
-                                else:
-                                    # We don't expect UK - any result is fine, BUT check places config first
-                                    if non_uk_locations and not uk_locations:
-                                        # We have non-UK results but no UK ones - check places config
-                                        if show_debug:
-                                            print(f"   → Multiple non-UK results, checking if '{remaining_parts[-1]}' is in UK places config...")
-                                        enhanced_address = self._check_places_config_for_uk_enhancement(query)
-                                        if enhanced_address and enhanced_address != query:
-                                            if show_debug:
-                                                print(f"   → Trying enhanced address: '{enhanced_address}' (found '{remaining_parts[-1]}' in UK places config)")
-                                            enhanced_location = geolocator.geocode(enhanced_address, timeout=15)
-                                            if enhanced_location:
-                                                enhanced_address_lower = enhanced_location.address.lower()
-                                                if any(indicator in enhanced_address_lower for indicator in uk_result_indicators):
-                                                    if show_debug:
-                                                        print(f"   ✓ Enhanced address gave UK result: {enhanced_location.address}")
-                                                    chosen_location = enhanced_location
-                                                    break
-                                                else:
-                                                    if show_debug:
-                                                        print(f"   → Enhanced address didn't give UK result, using first original result")
-                                                    chosen_location = locations[0]
-                                                    break
-                                            else:
-                                                if show_debug:
-                                                    print(f"   → Enhanced address failed, using first original result")
-                                                chosen_location = locations[0]
-                                                break
-                                        else:
-                                            if show_debug:
-                                                print(f"   → '{remaining_parts[-1]}' not found in UK places config, using first result")
-                                            chosen_location = locations[0]
-                                            break
-                                    else:
-                                        # We have UK results or mixed results - prefer UK if available
-                                        if uk_locations:
-                                            chosen_location = uk_locations[0]
-                                            if show_debug:
-                                                print(f"   → Using UK result: {chosen_location.address}")
-                                        else:
-                                            chosen_location = locations[0]
-                                            if show_debug:
-                                                print(f"   → Using first result: {chosen_location.address}")
-                                        break
-                            else:
-                                if show_debug:
-                                    print(f"   ✗ No multiple results either")
-                                continue
-                        
-                        time.sleep(1)  # Rate limiting between attempts
-                        
-                    except Exception as e:
-                        if show_debug:
-                            print(f"   ✗ Error with query '{query}': {e}")
-                        continue
-                
-                # If we went through all parts and still nothing
-                if not chosen_location:
-                    if show_debug:
-                        print(f"\n   ✗ All {len(place_parts)} attempts failed")
-            
-            # Cache and return the chosen location
-            if chosen_location:
-                cache_entry = {
-                    'lat': chosen_location.latitude,
-                    'lng': chosen_location.longitude,
-                    'cached_date': datetime.now().isoformat(),
-                    'source': 'nominatim_enhanced_progressive_with_config_debug',
-                    'geocoded_address': chosen_location.address
-                }
-                self._geocoding_cache[place_key] = cache_entry
-                
-                time.sleep(1)  # Rate limiting
-                
-                return {
-                    'latitude': chosen_location.latitude,
-                    'longitude': chosen_location.longitude,
-                    'source': 'geocoded'
-                }
-            
-            # If everything failed, cache the failure
-            self._geocoding_cache[place_key] = {
-                'lat': None,
-                'lng': None,
-                'cached_date': datetime.now().isoformat(),
-                'source': 'failed_enhanced_progressive_with_config_debug'
-            }
-            
-            if show_debug:
-                print(f"✗ Could not geocode '{place_name}'")
-            
-            return None
-            
-        except Exception as e:
-            if show_debug:
-                print(f"Error in enhanced geocoding for '{place_name}': {e}")
-            return None
-
-
-
-
-
     def _find_places_config_match(self, original_address: str, uk_locations: list) -> object:
         """Check if any UK locations match places from our places config."""
-        try:
-            places_config_file = self._base_dir / 'places_config.json'
-            
-            if not places_config_file.exists():
-                return None
-            
-            with open(places_config_file, 'r', encoding='utf-8') as f:
-                places_config = json.load(f)
-            
-            # Extract all place names from config
-            config_places = set()
-            
-            def extract_places_recursive(data):
-                if isinstance(data, dict):
-                    for key, value in data.items():
-                        if key not in {'_comment', 'nation_counties', 'county_places', 'nation_places', 'local2_places', 'known_streets'}:
-                            # Handle slash-separated places
-                            if '/' in key:
-                                config_places.update([p.strip().lower() for p in key.split('/') if p.strip()])
-                            else:
-                                config_places.add(key.lower())
-                            extract_places_recursive(value)
-                elif isinstance(data, list):
-                    for item in data:
-                        if isinstance(item, str):
-                            # Handle slash-separated places
-                            if '/' in item:
-                                config_places.update([p.strip().lower() for p in item.split('/') if p.strip()])
-                            else:
-                                config_places.add(item.lower())
+        if not self._places_config:
+            return None
+        
+        # Extract all place names from config
+        config_places = set()
+        
+        def extract_places_recursive(data):
+            if isinstance(data, dict):
+                for key, value in data.items():
+                    if key not in {'_comment', 'nation_counties', 'county_places', 'nation_places', 'local2_places', 'known_streets'}:
+                        # Handle slash-separated places
+                        if '/' in key:
+                            config_places.update([p.strip().lower() for p in key.split('/') if p.strip()])
                         else:
-                            extract_places_recursive(item)
-            
-            extract_places_recursive(places_config)
-            
-            # Check original address parts against config
-            original_parts = [p.strip().lower() for p in original_address.split(',') if p.strip()]
-            config_matches_in_original = [part for part in original_parts if part in config_places]
-            
-            if not config_matches_in_original:
-                print(f"   → No parts of '{original_address}' found in places config")
-                return None
-            
-            print(f"   → Found config places in original address: {config_matches_in_original}")
-            
-            # Now check which UK locations contain these config places
-            best_match = None
-            best_match_count = 0
-            
-            for location in uk_locations:
-                location_lower = location.address.lower()
-                match_count = sum(1 for config_place in config_matches_in_original if config_place in location_lower)
-                
-                print(f"   → Checking: {location.address}")
-                print(f"     Config matches: {match_count}")
-                
-                if match_count > best_match_count:
-                    best_match = location
-                    best_match_count = match_count
-            
-            if best_match and best_match_count > 0:
-                print(f"   → Best config match ({best_match_count} matches): {best_match.address}")
-                return best_match
-            
+                            config_places.add(key.lower())
+                        extract_places_recursive(value)
+            elif isinstance(data, list):
+                for item in data:
+                    if isinstance(item, str):
+                        # Handle slash-separated places
+                        if '/' in item:
+                            config_places.update([p.strip().lower() for p in item.split('/') if p.strip()])
+                        else:
+                            config_places.add(item.lower())
+                    else:
+                        extract_places_recursive(item)
+        
+        extract_places_recursive(self._places_config)
+        
+        # Check original address parts against config
+        original_parts = [p.strip().lower() for p in original_address.split(',') if p.strip()]
+        config_matches_in_original = [part for part in original_parts if part in config_places]
+        
+        if not config_matches_in_original:
+            print(f"   → No parts of '{original_address}' found in places config")
             return None
+        
+        print(f"   → Found config places in original address: {config_matches_in_original}")
+        
+        # Now check which UK locations contain these config places
+        best_match = None
+        best_match_count = 0
+        
+        for location in uk_locations:
+            location_lower = location.address.lower()
+            match_count = sum(1 for config_place in config_matches_in_original if config_place in location_lower)
             
-        except Exception as e:
-            print(f"   → Error checking places config: {e}")
-            return None
+            print(f"   → Checking: {location.address}")
+            print(f"     Config matches: {match_count}")
+            
+            if match_count > best_match_count:
+                best_match = location
+                best_match_count = match_count
+        
+        if best_match and best_match_count > 0:
+            print(f"   → Best config match ({best_match_count} matches): {best_match.address}")
+            return best_match
+        
+        return None
 
     def export_places_csv(self, places_data: dict):
         """Export places as CSV for import into mapping tools."""
@@ -4270,10 +4080,6 @@ class Ged4PyGedcomDB(GedcomDB):
         print(f"CSV exported: {filename}")
         print("You can import this into Google My Maps, QGIS, or other mapping tools.")
         return filename
-
-
-
-
 
     def find_potential_duplicates(self):
         """Find potential duplicate individuals based on name similarity and date proximity."""
@@ -4541,9 +4347,6 @@ class Ged4PyGedcomDB(GedcomDB):
                 return True  # Found cousin relationship
         
         return False
-
-
-
 
     def _calculate_name_similarity(self, name1: str, name2: str) -> float:
         """Calculate similarity between two names using multiple algorithms."""
