@@ -2522,40 +2522,70 @@ class Ged4PyGedcomDB(GedcomDB):
         except Exception as e:
             print(f"Error saving geocoding cache: {e}")
 
+
+
+
     def _get_geocoded_location(self, place_name: str, person_info: dict = None, debug: bool = False):
         """Get geocoded location using enhanced UK-preference algorithm with progressive left-trimming."""
         if not place_name or not place_name.strip():
             return None
         
-        place_key = place_name.strip().lower() 
+        place_key = place_name.strip().lower()
         
         if debug:
             print(f"\n--- GEOCODING DEBUG ---")
             print(f"Original input: '{place_name}'")
             print(f"Cache key: '{place_key}'")
-
-        # Direct cache match first - silent
+        
+        # Direct cache match first - silent unless debugging
         if place_key in self._geocoding_cache:
             cached_data = self._geocoding_cache[place_key]
             
             if debug:
-                print(f"✓ CACHE HIT: Found in geocoding cache")
-                print(f"  Source: {cached_data.get('source', 'Unknown')}")
-                if cached_data.get('geocoded_address'):
-                    print(f"  Geocoded address: {cached_data.get('geocoded_address')}")
                 if cached_data.get('lat') is not None:
+                    print(f"✓ CACHE HIT: Found in cache with key '{place_key}'")
+                    print(f"  Source: {cached_data.get('source', 'Unknown')}")
+                    if cached_data.get('geocoded_address'):
+                        print(f"  Geocoded address: {cached_data.get('geocoded_address')}")
                     print(f"  Coordinates: {cached_data.get('lat')}, {cached_data.get('lng')}")
+                    if 'derived_from' in cached_data:
+                        print(f"  Derived from: '{cached_data.get('derived_from')}'")
+                    
+                    # Ask if user wants to remove the cache entry
+                    remove_cache = input(f"  Remove this cache entry? (y/N): ").strip().lower()
+                    if remove_cache == 'y':
+                        del self._geocoding_cache[place_key]
+                        print(f"  ✓ Cache entry for '{place_key}' removed")
+                        # Continue with geocoding instead of returning cached result
+                    else:
+                        # Return cached result as before
+                        return {
+                            'latitude': cached_data['lat'],
+                            'longitude': cached_data['lng'],
+                            'source': 'cache'
+                        }
                 else:
-                    print(f"  [Cached failed lookup]")
-
-            if cached_data.get('lat') is not None and cached_data.get('lng') is not None:
-                return {
-                    'latitude': cached_data['lat'],
-                    'longitude': cached_data['lng'],
-                    'source': 'cache'
-                }
+                    print(f"✗ Found failed lookup in cache")
+                    # Ask if user wants to remove the failed lookup
+                    remove_cache = input(f"  Remove this failed cache entry? (y/N): ").strip().lower()
+                    if remove_cache == 'y':
+                        del self._geocoding_cache[place_key]
+                        print(f"  ✓ Failed cache entry for '{place_key}' removed")
+                        # Continue with geocoding instead of returning None
+                    else:
+                        return None
             else:
-                return None
+                # Non-debug mode - original behavior
+                if cached_data.get('lat') is not None and cached_data.get('lng') is not None:
+                    return {
+                        'latitude': cached_data['lat'],
+                        'longitude': cached_data['lng'],
+                        'source': 'cache'
+                    }
+                else:
+                    return None
+        elif debug:
+            print(f"✗ CACHE MISS: Not found in cache with key '{place_key}'")
         
         # Determine if this looks like a UK address (to guide preference logic)
         uk_address_indicators = ['uk', 'england', 'wales', 'scotland', 'northern ireland', 'great britain', 'britain']
@@ -2566,91 +2596,201 @@ class Ged4PyGedcomDB(GedcomDB):
             from geopy.geocoders import Nominatim
             import time
             
+            # Record the time of the API call start
+            last_api_call_time = time.time()
+            
             geolocator = Nominatim(user_agent="family_tree_mapper_v1.0")
             uk_result_indicators = ['united kingdom', 'uk', 'great britain', 'gb', 'england', 'wales', 'scotland', 'northern ireland']
             
             if debug:
                 print(f"\nChecking if address looks like UK: {looks_like_uk_address}")
                 print(f"Checking for UK enhancement via places_config...")
-
+            
             # Check places_config for UK enhancement
-            enhanced_address = self._check_places_config_for_uk_enhancement(place_name, debug=True)
+            enhanced_address = self._check_places_config_for_uk_enhancement(place_name, debug=debug)
             if enhanced_address and enhanced_address != place_name:
-                if person_info and debug:
-                    print(f"Trying UK-enhanced address: {enhanced_address}")
+                if debug:
+                    print(f"✓ ENHANCED: '{place_name}' → '{enhanced_address}'")
+                    print(f"  Attempting geocoding with enhanced address...")
+                
                 # Try geocoding with enhanced address (adds UK context)
                 enhanced_location = geolocator.geocode(enhanced_address, timeout=15)
+                
+                # Calculate time since last API call and sleep if needed
+                elapsed = time.time() - last_api_call_time
+                sleep_time = max(0, 1.0 - elapsed)
+                if sleep_time > 0:
+                    if debug:
+                        print(f"  Rate limiting: Waiting {sleep_time:.3f}s")
+                    time.sleep(sleep_time)
+                last_api_call_time = time.time()
+                
                 if enhanced_location:
+                    if debug:
+                        print(f"  ✓ Enhanced geocoding successful!")
+                        print(f"    Result: {enhanced_location.address}")
+                        print(f"    Coordinates: {enhanced_location.latitude}, {enhanced_location.longitude}")
+                    
                     # Check if it's a UK result
                     enhanced_address_lower = enhanced_location.address.lower()
                     is_uk_result = any(indicator in enhanced_address_lower for indicator in uk_result_indicators)
+                    
+                    if debug:
+                        print(f"    Is UK result: {is_uk_result}")
+                    
                     if is_uk_result:
                         # Use the enhanced UK result
                         chosen_location = enhanced_location
+                        if debug:
+                            print(f"  ✓ SELECTED: Enhanced UK result chosen")
+                        
                         cache_entry = {
                             'lat': chosen_location.latitude,
                             'lng': chosen_location.longitude,
                             'cached_date': datetime.now().isoformat(),
                             'source': 'nominatim_places_config_enhanced',
-                            'geocoded_address': chosen_location.address
+                            'geocoded_address': chosen_location.address,
+                            'original_query': place_name,
+                            'enhanced_query': enhanced_address
                         }
-                        self._geocoding_cache[place_key] = cache_entry
                         
-                        time.sleep(1)  # Rate limiting
+                        # Ask before caching in debug mode
+                        if debug:
+                            add_to_cache = input(f"  Add this UK enhanced result to cache? (Y/n): ").strip().lower()
+                            if add_to_cache != 'n':  # Default is yes
+                                self._geocoding_cache[place_key] = cache_entry
+                                print(f"  ✓ Result cached with key '{place_key}'")
+                        else:
+                            self._geocoding_cache[place_key] = cache_entry
                         
                         return {
                             'latitude': chosen_location.latitude,
                             'longitude': chosen_location.longitude,
                             'source': 'geocoded_uk_enhanced'
                         }
+                    elif debug:
+                        print(f"  ✗ Enhanced result not from UK, trying standard methods...")
+                elif debug:
+                    print(f"  ✗ Enhanced geocoding failed, trying standard methods...")
+            elif debug and enhanced_address == place_name:
+                print(f"✗ No enhancement available from places_config")
             
             chosen_location = None
             
             # If it's not a comma-separated address, just try it once
             if ',' not in place_name:
+                if debug:
+                    print(f"\nSimple address (no commas): '{place_name}'")
+                    print(f"Geocoding directly...")
+                
                 location = geolocator.geocode(place_name, timeout=15)
+                
+                # Rate limiting
+                elapsed = time.time() - last_api_call_time
+                sleep_time = max(0, 1.0 - elapsed)
+                if sleep_time > 0:
+                    if debug:
+                        print(f"  Rate limiting: Waiting {sleep_time:.3f}s")
+                    time.sleep(sleep_time)
+                last_api_call_time = time.time()
+                
                 if location:
+                    if debug:
+                        print(f"  ✓ Result found: {location.address}")
+                        print(f"    Coordinates: {location.latitude}, {location.longitude}")
                     chosen_location = location
+                elif debug:
+                    print(f"  ✗ No results found")
             else:
                 # Progressive left-trimming for comma-separated addresses
                 place_parts = [p.strip() for p in place_name.split(',') if p.strip()]
+                
+                if debug:
+                    print(f"\nComma-separated address: '{place_name}'")
+                    print(f"Parts: {place_parts}")
+                    print(f"Trying progressive left-trimming...")
                 
                 for attempt in range(len(place_parts)):
                     # Create query by joining remaining parts (from attempt index onwards)
                     remaining_parts = place_parts[attempt:]
                     query = ', '.join(remaining_parts)
                     
+                    if debug:
+                        print(f"\n  Attempt #{attempt+1}: '{query}'")
+                    
                     try:
                         # Try single result first
                         location = geolocator.geocode(query, timeout=15)
                         
+                        # Rate limiting
+                        elapsed = time.time() - last_api_call_time
+                        sleep_time = max(0, 1.0 - elapsed)
+                        if sleep_time > 0:
+                            if debug:
+                                print(f"  Rate limiting: Waiting {sleep_time:.3f}s")
+                            time.sleep(sleep_time)
+                        last_api_call_time = time.time()
+                        
                         if location:
+                            if debug:
+                                print(f"    ✓ Result found: {location.address}")
+                                print(f"      Coordinates: {location.latitude}, {location.longitude}")
+                            
                             # Check if single result is UK
                             address_lower = location.address.lower()
                             is_uk_result = any(indicator in address_lower for indicator in uk_result_indicators)
+                            
+                            if debug:
+                                print(f"      Is UK result: {is_uk_result}")
                             
                             # Accept single result if:
                             # 1. It's UK and we expect UK, OR
                             # 2. We don't expect UK (so any result is fine)
                             if (is_uk_result and looks_like_uk_address) or not looks_like_uk_address:
+                                if debug:
+                                    print(f"      ✓ ACCEPTED: Meets criteria")
                                 chosen_location = location
                                 break
                             else:
+                                if debug:
+                                    print(f"      ✗ REJECTED: Not a UK result but UK expected")
                                 # Single result is not UK but we expect UK, check multiple results
                                 pass
+                        elif debug:
+                            print(f"    ✗ No single result found")
                         
                         # Try multiple results if single wasn't suitable or didn't exist
                         if not chosen_location:
+                            if debug:
+                                print(f"    Trying multiple results...")
+                            
                             locations = geolocator.geocode(query, exactly_one=False, timeout=15)
                             
+                            # Rate limiting
+                            elapsed = time.time() - last_api_call_time
+                            sleep_time = max(0, 1.0 - elapsed)
+                            if sleep_time > 0:
+                                if debug:
+                                    print(f"  Rate limiting: Waiting {sleep_time:.3f}s")
+                                time.sleep(sleep_time)
+                            last_api_call_time = time.time()
+                            
                             if locations:
+                                if debug:
+                                    print(f"    ✓ Found {len(locations)} results:")
+                                
                                 uk_locations = []
                                 non_uk_locations = []
                                 
-                                for loc in locations:
+                                for idx, loc in enumerate(locations, 1):
                                     # Check if this looks like UK
                                     address_lower = loc.address.lower()
                                     is_uk_result = any(indicator in address_lower for indicator in uk_result_indicators)
+                                    
+                                    if debug:
+                                        uk_marker = "✓" if is_uk_result else "✗"
+                                        print(f"      {idx}. {uk_marker} {loc.address}")
+                                        print(f"         Coordinates: {loc.latitude}, {loc.longitude}")
                                     
                                     if is_uk_result:
                                         uk_locations.append(loc)
@@ -2659,26 +2799,35 @@ class Ged4PyGedcomDB(GedcomDB):
                                 
                                 # Choose based on whether we expect a UK address
                                 if looks_like_uk_address:
+                                    if debug:
+                                        print(f"    We expect UK address - checking {len(uk_locations)} UK results")
                                     # We expect UK - prefer UK results if available
                                     if uk_locations:
+                                        if debug:
+                                            print(f"      ✓ SELECTED: Using first UK result: {uk_locations[0].address}")
                                         chosen_location = uk_locations[0]
                                         break
                                     elif non_uk_locations:
+                                        if debug:
+                                            print(f"      ✗ No UK results - continuing with shorter address parts")
                                         # No UK results but we have others - continue trying shorter address parts
                                         continue
                                     else:
+                                        if debug:
+                                            print(f"      ✗ No results at all - continuing")
                                         # No results at all - continue
                                         continue
                                 else:
+                                    if debug:
+                                        print(f"    UK not expected - using first available result")
                                     # We don't expect UK - any result is fine, prefer first available
                                     if locations:
+                                        if debug:
+                                            print(f"      ✓ SELECTED: Using first result: {locations[0].address}")
                                         chosen_location = locations[0]
                                         break
-                            else:
-                                # No multiple results either - continue to next attempt
-                                continue
-                        
-                        time.sleep(1)  # Rate limiting between attempts
+                            elif debug:
+                                print(f"    ✗ No multiple results found either")
                         
                     except Exception as e:
                         print(f"Error geocoding '{query}': {e}")
@@ -2686,16 +2835,27 @@ class Ged4PyGedcomDB(GedcomDB):
             
             # Cache and return the chosen location
             if chosen_location:
+                if debug:
+                    print(f"\n✓ FINAL SELECTION: {chosen_location.address}")
+                    print(f"  Coordinates: {chosen_location.latitude}, {chosen_location.longitude}")
+                
                 cache_entry = {
                     'lat': chosen_location.latitude,
                     'lng': chosen_location.longitude,
                     'cached_date': datetime.now().isoformat(),
                     'source': 'nominatim_enhanced_progressive',
-                    'geocoded_address': chosen_location.address
+                    'geocoded_address': chosen_location.address,
+                    'original_query': place_name
                 }
-                self._geocoding_cache[place_key] = cache_entry
                 
-                time.sleep(1)  # Rate limiting
+                # Ask before caching in debug mode
+                if debug:
+                    add_to_cache = input(f"\nAdd this result to cache? (Y/n): ").strip().lower()
+                    if add_to_cache != 'n':  # Default is yes
+                        self._geocoding_cache[place_key] = cache_entry
+                        print(f"  ✓ Result cached with key '{place_key}'")
+                else:
+                    self._geocoding_cache[place_key] = cache_entry
                 
                 return {
                     'latitude': chosen_location.latitude,
@@ -2704,12 +2864,28 @@ class Ged4PyGedcomDB(GedcomDB):
                 }
             
             # If everything failed, cache the failure
-            self._geocoding_cache[place_key] = {
-                'lat': None,
-                'lng': None,
-                'cached_date': datetime.now().isoformat(),
-                'source': 'failed_enhanced_progressive'
-            }
+            if debug:
+                print(f"\n✗ ALL METHODS FAILED: No location found for '{place_name}'")
+                
+                # Ask before caching failure in debug mode
+                add_to_cache = input(f"\nCache this failed lookup? (Y/n): ").strip().lower()
+                if add_to_cache != 'n':  # Default is yes
+                    self._geocoding_cache[place_key] = {
+                        'lat': None,
+                        'lng': None,
+                        'cached_date': datetime.now().isoformat(),
+                        'source': 'failed_enhanced_progressive',
+                        'original_query': place_name
+                    }
+                    print(f"  ✓ Failed lookup cached with key '{place_key}'")
+            else:
+                self._geocoding_cache[place_key] = {
+                    'lat': None,
+                    'lng': None,
+                    'cached_date': datetime.now().isoformat(),
+                    'source': 'failed_enhanced_progressive',
+                    'original_query': place_name
+                }
             
             if person_info:
                 print(f"  ✗ Could not geocode '{place_name}' for {person_info.get('name', 'Unknown')} (born {person_info.get('birth_year', 'Unknown')})")
@@ -2870,9 +3046,6 @@ class Ged4PyGedcomDB(GedcomDB):
         
         # If we get here, the last part wasn't found in UK places config
         return address
-
-
-
 
     def _fallback_smart_part_matching(self, place_name: str, person_info: dict, geolocator, uk_indicators):
         """Fallback to smart part matching when full address methods fail."""
